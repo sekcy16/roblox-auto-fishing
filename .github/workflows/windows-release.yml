@@ -1,0 +1,45 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v0.0.1"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "pyinstaller>=6.0"
+      - name: Run tests
+        run: python -m unittest test_auto_fishing test_desktop_control -v
+      - name: Build executable
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.1 --version-file windows-version-info.txt auto_fishing.py
+      - name: Create ZIP
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release/RobloxAutoFishing-v0.0.1
+          Copy-Item dist/RobloxAutoFishing-v0.0.1.exe release/RobloxAutoFishing-v0.0.1/
+          Copy-Item WINDOWS-README.txt release/RobloxAutoFishing-v0.0.1/
+          Compress-Archive -Force release/RobloxAutoFishing-v0.0.1/* release/RobloxAutoFishing-v0.0.1.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RobloxAutoFishing-v0.0.1-Windows
+          path: release/RobloxAutoFishing-v0.0.1.zip
+          if-no-files-found: error
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$env:GITHUB_REF_NAME" "release/RobloxAutoFishing-v0.0.1.zip" --title "Roblox Auto Fishing 0.0.1" --notes "Windows portable release. Extract the ZIP and open RobloxAutoFishing-v0.0.1.exe."

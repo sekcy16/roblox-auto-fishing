@@ -1,0 +1,6 @@
+numpy>=1.24
+opencv-python>=4.8
+mss>=9.0
+PyAutoGUI>=0.9.54
+Pillow>=10.0
+python-xlib>=0.33; platform_system == "Linux"
