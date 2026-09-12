@@ -289,8 +289,8 @@ class Controller:
             self.velocity = (x - self.previous_x) / (now - self.previous_time)
         else:
             self.velocity = 0.0
-        self.previous_x, self.previous_time = x, now
-        margin = min(float(self.settings["margin"]), max(0.0, (target[1] - target[0]) / 2))
+        target_width = target[1] - target[0]
+        margin = min(float(self.settings["margin"]), max(0.0, target_width * 0.15))
         desired = choose_hold(x, target, self.velocity, float(self.settings["lead"]), margin,
                               bool(self.settings["right_on_hold"]), self.held)
         if entering:
@@ -522,7 +522,7 @@ def _set_fast_input_timing() -> None:
     try:
         pyautogui = _load_pyautogui()
         _input_pause_before_run = getattr(pyautogui, "PAUSE", None)
-        pyautogui.PAUSE = 0.01
+        pyautogui.PAUSE = 0.0
     except Exception:
         _input_pause_before_run = None
 
@@ -1243,7 +1243,7 @@ class FishingApp:
             self._set_status(f"พักการทำงาน: {exc}")
             self.stop()
             return
-        self.root.after(33, self._pump)
+        self.root.after(12, self._pump)
 
     def stop(self, reason: str | None = None):
         cancelled = False
