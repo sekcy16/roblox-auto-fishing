@@ -63,6 +63,7 @@ DEFAULT_SETTINGS = {
     "lead": 0.0,
     "bite_threshold": 0.85,
     "bite_ack": True,
+    "debug": False,
     "rois": {"bar": None, "bite": None},
 }
 
@@ -95,7 +96,7 @@ def validate_settings(data: dict[str, Any], screen_bounds: tuple[int, int, int, 
         if not _finite(value) or float(value) < low or (high is not None and float(value) > high):
             raise ValueError(f"ค่า {key} อยู่นอกช่วงที่กำหนด")
         result[key] = float(value)
-    for key in ("right_on_hold", "bite_ack"):
+    for key in ("right_on_hold", "bite_ack", "debug"):
         if key in result and not isinstance(result.get(key), bool):
             raise ValueError(f"ค่า {key} ต้องเป็น true หรือ false")
     rois = dict(DEFAULT_SETTINGS["rois"])
@@ -121,69 +122,78 @@ def validate_settings(data: dict[str, Any], screen_bounds: tuple[int, int, int, 
 def detect_bar(bgr: Any) -> tuple[str, float | None, tuple[float, float] | None]:
     """Pair a purple horizontal target with an aligned white vertical marker.
 
-    Do not locate the black track first: a dark scene merges with it. HSV
-    tolerates the blue-purple target seen in the actual night-game capture.
+    Tolerates transparency, varying brightness, small target sizes, and partial
+    occlusion caused by the white marker overlapping the purple target.
     """
     if (cv2 is None or np is None or not isinstance(bgr, np.ndarray)
             or bgr.ndim != 3 or bgr.shape[2] < 3 or not bgr.size):
         return "absent", None, None
     image = np.ascontiguousarray(bgr[:, :, :3], dtype=np.uint8)
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    purple = cv2.inRange(hsv, (115, 35, 50), (165, 255, 255))
-    white = cv2.inRange(hsv, (0, 0, 200), (179, 45, 255))
+    purple = cv2.inRange(hsv, (110, 25, 40), (168, 255, 255))
+    white = cv2.inRange(hsv, (0, 0, 195), (179, 50, 255))
 
     def components(mask):
         _, _, stats, _ = cv2.connectedComponentsWithStats(mask)
         return [tuple(map(int, row)) for row in stats[1:]]
 
-    targets = [(x, y, w, h) for x, y, w, h, area in components(purple)
-               if 4 <= h <= 64 and w >= 12 and w >= h * 1.3
-               and area >= w * h * 0.6]
     markers = [(x, y, w, h) for x, y, w, h, area in components(white)
-               if 6 <= h <= 80 and 3 <= w <= h
-               and area >= w * h * 0.55]
-    if not targets:
+               if 6 <= h <= 80 and 3 <= w <= h * 1.2
+               and area >= w * h * 0.50]
+
+    raw_targets = [(x, y, w, h) for x, y, w, h, area in components(purple)
+                   if 4 <= h <= 64 and w >= 3
+                   and area >= min(6, w * h * 0.35)]
+    if not raw_targets:
         return "absent", None, None
 
     def aligned(a, b):
         _, y, _, h = a
         _, other_y, _, other_h = b
-        return (0.5 <= h / other_h <= 2.0
-                and abs(y + h / 2 - other_y - other_h / 2) <= max(3, min(h, other_h) * 0.3))
+        return (0.4 <= h / other_h <= 2.5
+                and abs(y + h / 2.0 - other_y - other_h / 2.0) <= max(3.0, min(h, other_h) * 0.35))
 
-    # Join target halves only when the white marker visibly covers their gap.
-    targets.sort()
+    raw_targets.sort()
     merged = []
-    for target in targets:
+    for target in raw_targets:
         x, y, w, h = target
         joined = False
         for index, previous in enumerate(merged):
             px, py, pw, ph = previous
             gap_left, gap_right = px + pw, x
-            if aligned(previous, target) and 0 <= gap_right - gap_left <= max(h, ph) * 1.5:
-                covering = any(aligned(marker, target) and mx <= gap_left + 2
-                               and mx + mw >= gap_right - 2
-                               for marker in markers for mx, my, mw, mh in [marker])
-                if covering:
+            if aligned(previous, target):
+                if 0 <= gap_right - gap_left <= 4:
                     top, bottom = min(py, y), max(py + ph, y + h)
                     merged[index] = (px, top, x + w - px, bottom - top)
                     joined = True
                     break
+                elif 0 <= gap_right - gap_left <= max(h, ph) * 2.0:
+                    covering = any(aligned(marker, target) and mx <= gap_left + 3
+                                   and mx + mw >= gap_right - 3
+                                   for marker in markers for mx, my, mw, mh in [marker])
+                    if covering:
+                        top, bottom = min(py, y), max(py + ph, y + h)
+                        merged[index] = (px, top, x + w - px, bottom - top)
+                        joined = True
+                        break
         if not joined:
             merged.append(target)
 
+    valid_targets = [t for t in merged if t[2] >= 8]
+    if not valid_targets:
+        return "absent", None, None
+
     matches = []
-    for target in merged:
+    for target in valid_targets:
         x, y, w, h = target
-        if w < h * 1.5:
-            continue
         for marker in markers:
             if aligned(target, marker):
                 mx, my, mw, mh = marker
                 y_center_diff = abs((y + h / 2.0) - (my + mh / 2.0))
                 h_diff = abs(h - mh)
                 score = y_center_diff * 2.0 + h_diff
-                matches.append((score, (mx + (mw - 1) / 2), (float(x), float(x + w))))
+                matches.append((score, (mx + (mw - 1) / 2.0), (float(x), float(x + w))))
+
     if not matches:
         return "absent", None, None
     if len(matches) == 1:
@@ -220,10 +230,25 @@ def choose_hold(x: float, target: tuple[float, float], velocity: float, lead: fl
     values = (x, velocity, lead, margin, *target)
     if not all(_finite(value) for value in values) or target[0] >= target[1] or margin < 0:
         raise ValueError("invalid tracking values")
+    target_center = (target[0] + target[1]) / 2.0
     predicted = x + velocity * lead
-    error = (target[0] + target[1]) / 2 - predicted
+    error = target_center - predicted
+
+    # Deadband hysteresis around center
     if abs(error) <= margin:
+        # If moving fast towards/through the center, brake to prevent overshoot
+        if right_on_hold:
+            if velocity > 40.0 and predicted >= target_center:
+                return False
+            elif velocity < -40.0 and predicted <= target_center:
+                return True
+        else:
+            if velocity < -40.0 and predicted <= target_center:
+                return False
+            elif velocity > 40.0 and predicted >= target_center:
+                return True
         return held
+
     return (error > 0) == right_on_hold
 
 
@@ -243,6 +268,12 @@ class Controller:
         self.ambiguous_streak = 0
         self.previous_x = self.previous_time = None
         self.velocity = 0.0
+        configured_lead = float(self.settings.get("lead", 0.0))
+        self.calibrated_latency = configured_lead if configured_lead > 0.0 else 0.04
+        self.last_switch_action = None
+        self.last_switch_time = None
+        self.last_switch_x = None
+        self.telemetry: dict[str, Any] = {}
 
     def start(self, now: float) -> None:
         self.state, self.reason = "Cast", ""
@@ -254,6 +285,10 @@ class Controller:
         self.held = False
         self.previous_x = self.previous_time = None
         self.velocity = 0.0
+        self.last_switch_action = None
+        self.last_switch_time = None
+        self.last_switch_x = None
+        self.telemetry = {}
 
     def stop(self, reason: str = "stopped by user") -> str:
         action = "release" if self.held else "none"
@@ -280,28 +315,103 @@ class Controller:
         value = observation.get("bar") if isinstance(observation, dict) else None
         return value if isinstance(value, tuple) and len(value) == 3 else ("absent", None, None)
 
-    def _track_step(self, now: float, x: float, target: tuple[float, float]) -> str:
+    def _on_turnaround(self, x: float, target: tuple[float, float]) -> None:
+        """Fine-tune calibrated latency based on physical turnaround location relative to target."""
+        if getattr(self, "last_switch_action", None) is None:
+            return
+        configured_lead = float(self.settings.get("lead", 0.0))
+        if configured_lead > 0.0:
+            return
+        target_left, target_right = target
+        right_on_hold = bool(self.settings.get("right_on_hold", False))
+        if (self.last_switch_action == "release" and right_on_hold) or (self.last_switch_action == "hold" and not right_on_hold):
+            if x < target_left:
+                self.calibrated_latency = max(0.0, self.calibrated_latency - 0.005)
+            elif x > target_right + 2.0:
+                self.calibrated_latency = min(0.20, self.calibrated_latency + 0.005)
+        elif (self.last_switch_action == "hold" and right_on_hold) or (self.last_switch_action == "release" and not right_on_hold):
+            if x > target_right:
+                self.calibrated_latency = max(0.0, self.calibrated_latency - 0.005)
+            elif x < target_left - 2.0:
+                self.calibrated_latency = min(0.20, self.calibrated_latency + 0.005)
+
+    def _track_step(self, now: float, x: float, target: tuple[float, float],
+                    capture_time: float | None = None) -> str:
         entering = (self.state != "Track")
         self.state = "Track"
         self.absent_started = None
         self.ambiguous_streak = 0
-        if not entering and self.previous_x is not None and self.previous_time is not None and now > self.previous_time:
-            self.velocity = (x - self.previous_x) / (now - self.previous_time)
+        t_obs = capture_time if capture_time is not None else now
+        frame_age = max(0.0, now - t_obs)
+
+        if not entering and self.previous_x is not None and self.previous_time is not None and t_obs > self.previous_time:
+            dt = t_obs - self.previous_time
+            if 0.001 < dt < 0.25:
+                v_instant = (x - self.previous_x) / dt
+                if self.velocity != 0.0 and (v_instant * self.velocity < -200.0):
+                    self._on_turnaround(x, target)
+                    self.velocity = v_instant
+                else:
+                    self.velocity = 0.70 * v_instant + 0.30 * self.velocity
+            else:
+                self.velocity = 0.0
         else:
             self.velocity = 0.0
+
+        self.previous_x = x
+        self.previous_time = t_obs
+
         target_width = target[1] - target[0]
-        margin = min(float(self.settings["margin"]), max(0.0, target_width * 0.15))
-        desired = choose_hold(x, target, self.velocity, float(self.settings["lead"]), margin,
+        half_width = target_width / 2.0
+        target_center = (target[0] + target[1]) / 2.0
+
+        prop_margin = target_width * 0.18
+        configured_margin = float(self.settings.get("margin", 3.0))
+        safe_max = max(1.0, half_width * 0.45)
+        safe_min = min(1.2, max(0.6, half_width * 0.30))
+        margin = min(configured_margin, prop_margin)
+        margin = max(safe_min, min(margin, safe_max))
+
+        configured_lead = float(self.settings.get("lead", 0.0))
+        lead_delay = configured_lead if configured_lead > 0.0 else self.calibrated_latency
+        total_latency = frame_age + lead_delay
+        predicted = x + self.velocity * total_latency
+
+        desired = choose_hold(x, target, self.velocity, total_latency, margin,
                               bool(self.settings["right_on_hold"]), self.held)
+
+        action = "none"
         if entering:
             self.held = desired
-            return "hold" if desired else "release"
-        if desired != self.held:
+            action = "hold" if desired else "release"
+        elif desired != self.held:
             self.held = desired
-            return "hold" if desired else "release"
-        return "none"
+            action = "hold" if desired else "release"
+            self.last_switch_action = action
+            self.last_switch_time = now
+            self.last_switch_x = x
 
-    def step(self, now: float, observation: dict[str, Any] | None, focused: bool) -> str:
+        error = target_center - predicted
+        self.telemetry = {
+            "target_left": round(float(target[0]), 1),
+            "target_right": round(float(target[1]), 1),
+            "target_center": round(float(target_center), 1),
+            "marker_x": round(float(x), 1),
+            "predicted_x": round(float(predicted), 1),
+            "velocity": round(float(self.velocity), 1),
+            "frame_age_ms": round(float(frame_age * 1000.0), 1),
+            "total_latency_ms": round(float(total_latency * 1000.0), 1),
+            "calibrated_lead_ms": round(float(lead_delay * 1000.0), 1),
+            "margin": round(float(margin), 1),
+            "error": round(float(error), 1),
+            "action": action,
+            "held": self.held,
+        }
+
+        return action
+
+    def step(self, now: float, observation: dict[str, Any] | None, focused: bool,
+             capture_time: float | None = None) -> str:
         now = float(now)
         if not focused:
             return self._pause("focus lost; press Start to resume")
@@ -334,11 +444,11 @@ class Controller:
                 self.bite_latched = True
                 return "click"
             if status == "valid" and x is not None and target is not None:
-                return self._track_step(now, x, target)
+                return self._track_step(now, x, target, capture_time=capture_time)
             return "none"
         if self.state == "End":
             if status == "valid" and x is not None and target is not None:
-                return self._track_step(now, x, target)
+                return self._track_step(now, x, target, capture_time=capture_time)
             if self.absent_started is None:
                 self.absent_started = now
             if now - self.absent_started >= 1.0:
@@ -358,7 +468,7 @@ class Controller:
                 self.held = False
                 self.state, self.absent_started = "End", now
                 return action
-            return self._track_step(now, x, target)
+            return self._track_step(now, x, target, capture_time=capture_time)
         return "none"
 
 
@@ -730,6 +840,7 @@ class FishingApp:
             "threshold": tk.StringVar(value=str(self.settings.get("bite_threshold", DEFAULT_SETTINGS["bite_threshold"]))),
             "right": tk.BooleanVar(value=bool(self.settings.get("right_on_hold", DEFAULT_SETTINGS["right_on_hold"]))),
             "ack": tk.BooleanVar(value=bool(self.settings.get("bite_ack", DEFAULT_SETTINGS["bite_ack"]))),
+            "debug": tk.BooleanVar(value=bool(self.settings.get("debug", DEFAULT_SETTINGS.get("debug", False)))),
         }
         self.status = tk.StringVar(value="พร้อม — เลือกหน้าต่างเกมและพื้นที่ตรวจจับ")
         self._build()
@@ -860,6 +971,7 @@ class FishingApp:
         self.ttk.Label(self.advanced_frame, text="ความเข้มงวดสัญญาณ (0–1)", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=2)
         self.ttk.Entry(self.advanced_frame, textvariable=self.vars["threshold"], width=8).grid(row=1, column=1, padx=8)
         self.ttk.Checkbutton(self.advanced_frame, text="คลิกเมื่อปลากินเบ็ด", variable=self.vars["ack"]).grid(row=1, column=2, columnspan=2, sticky="w")
+        self.ttk.Checkbutton(self.advanced_frame, text="แสดงข้อมูลติดตามละเอียด (ดีบัก)", variable=self.vars["debug"]).grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
         status_frame = self.ttk.LabelFrame(outer, text=" สถานะ ", style="Card.TLabelframe", padding=(10, 6))
         status_frame.pack(fill="x", pady=3)
@@ -948,6 +1060,7 @@ class FishingApp:
             "bite_threshold": float(self.vars["threshold"].get()),
             "right_on_hold": bool(self.vars["right"].get()),
             "bite_ack": bool(self.vars["ack"].get()),
+            "debug": bool(self.vars["debug"].get()),
             "rois": self.settings.get("rois", {}),
         }
 
@@ -1038,34 +1151,159 @@ class FishingApp:
         self.root.deiconify()
         picker = self.tk.Toplevel(self.root)
         picker.title(f"ลากกรอบพื้นที่ {area_names.get(name, name)}")
-        self.ttk.Label(picker, text="ลากกรอบให้ครอบเฉพาะส่วนที่ต้องการ แล้วปล่อยเมาส์", style="Card.TLabel").pack(anchor="w", padx=10, pady=(8, 4))
+        picker.transient(self.root)
+        self.ttk.Label(picker, text="คลิกค้างแล้วลากกรอบให้ครอบส่วนที่ต้องการ • กด Enter เพื่อยืนยัน หรือ Esc เพื่อยกเลิก", style="Card.TLabel").pack(anchor="w", padx=10, pady=(8, 4))
         max_width, max_height = 1100, 700
-        scale = min(1.0, max_width / image.shape[1], max_height / image.shape[0])
-        canvas = self.tk.Canvas(picker, width=int(image.shape[1] * scale), height=int(image.shape[0] * scale), cursor="crosshair")
+        img_h, img_w = image.shape[0], image.shape[1]
+        scale = min(1.0, max_width / max(1, img_w), max_height / max(1, img_h))
+        canvas_w = int(round(img_w * scale))
+        canvas_h = int(round(img_h * scale))
+        canvas = self.tk.Canvas(picker, width=canvas_w, height=canvas_h, cursor="crosshair", highlightthickness=0)
         canvas.pack()
         try:
             from PIL import Image, ImageTk
-            photo = ImageTk.PhotoImage(Image.fromarray(image[:, :, ::-1]).resize((canvas.winfo_reqwidth(), canvas.winfo_reqheight())))
+            photo = ImageTk.PhotoImage(Image.fromarray(image[:, :, ::-1]).resize((canvas_w, canvas_h)))
             canvas.create_image(0, 0, image=photo, anchor="nw")
             canvas._photo = photo
         except Exception:
-            canvas.configure(background="#555")
+            canvas.configure(background="#333")
+
         start = [None]
+        is_dragging = [False]
+        current_rect = [None]
+        selected_area = [None]
+
+        def clear_overlay():
+            canvas.delete("roi_overlay")
+
+        def draw_selection(x0, y0, x1, y1):
+            clear_overlay()
+            w, h = x1 - x0, y1 - y0
+            if w <= 0 or h <= 0:
+                return
+
+            # Translucent purple fill so underlying image is still clearly visible
+            canvas.create_rectangle(
+                x0, y0, x1, y1,
+                fill="#8b5cf6",
+                outline="",
+                stipple="gray25",
+                tags="roi_overlay"
+            )
+
+            # High-contrast double border visible on both dark and bright backgrounds
+            canvas.create_rectangle(
+                x0, y0, x1, y1,
+                outline="#2e1065",
+                width=3,
+                tags="roi_overlay"
+            )
+            canvas.create_rectangle(
+                x0, y0, x1, y1,
+                outline="#d8b4fe",
+                width=1,
+                tags="roi_overlay"
+            )
+
+            # Size in actual screen pixels
+            actual_w = max(1, int(round(w * img_w / canvas_w)))
+            actual_h = max(1, int(round(h * img_h / canvas_h)))
+            dim_text = f"{actual_w} × {actual_h} px"
+
+            # Position badge near box, guaranteed inside canvas boundaries
+            if y0 >= 24:
+                badge_y = y0 - 12
+            elif y1 <= canvas_h - 24:
+                badge_y = y1 + 12
+            else:
+                badge_y = y0 + 12
+
+            badge_x = (x0 + x1) / 2.0
+            half_badge = 46.0
+            badge_x = max(half_badge + 4, min(canvas_w - half_badge - 4, badge_x))
+
+            canvas.create_rectangle(
+                badge_x - half_badge, badge_y - 9,
+                badge_x + half_badge, badge_y + 9,
+                fill="#2e1065",
+                outline="#c084fc",
+                width=1,
+                tags="roi_overlay"
+            )
+            canvas.create_text(
+                badge_x, badge_y,
+                text=dim_text,
+                fill="#ffffff",
+                font=(self.ui_font, 9, "bold"),
+                tags="roi_overlay"
+            )
+
         def down(event):
-            start[0] = (event.x, event.y)
+            sx = max(0, min(canvas_w, event.x))
+            sy = max(0, min(canvas_h, event.y))
+            start[0] = (sx, sy)
+            is_dragging[0] = True
+            clear_overlay()
+            current_rect[0] = None
+            selected_area[0] = None
+            confirm_btn.configure(state="disabled")
+            info_label.configure(text="กำลังลากเลือกพื้นที่…")
+
+        def motion(event):
+            if not is_dragging[0] or start[0] is None:
+                return
+            cur_x = max(0, min(canvas_w, event.x))
+            cur_y = max(0, min(canvas_h, event.y))
+            x0, y0 = min(start[0][0], cur_x), min(start[0][1], cur_y)
+            x1, y1 = max(start[0][0], cur_x), max(start[0][1], cur_y)
+            current_rect[0] = (x0, y0, x1, y1)
+            draw_selection(x0, y0, x1, y1)
+
         def up(event):
-            if start[0] is None:
+            if not is_dragging[0] or start[0] is None:
                 return
-            x0, y0 = start[0]
-            x1, y1 = event.x, event.y
-            x, y, w, h = min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0)
-            if w < 2 or h < 2:
+            is_dragging[0] = False
+            cur_x = max(0, min(canvas_w, event.x))
+            cur_y = max(0, min(canvas_h, event.y))
+            x0, y0 = min(start[0][0], cur_x), min(start[0][1], cur_y)
+            x1, y1 = max(start[0][0], cur_x), max(start[0][1], cur_y)
+            w, h = x1 - x0, y1 - y0
+
+            if w < 3 or h < 3:
+                clear_overlay()
+                current_rect[0] = None
+                selected_area[0] = None
+                confirm_btn.configure(state="disabled")
+                info_label.configure(text="กรอบเล็กเกินไป กรุณาคลิกค้างแล้วลากใหม่")
                 return
-            canvas.create_rectangle(x, y, x + w, y + h, outline="red", width=2)
-            area = [bounds[0] + int(x / scale), bounds[1] + int(y / scale), int(w / scale), int(h / scale)]
+
+            current_rect[0] = (x0, y0, x1, y1)
+            draw_selection(x0, y0, x1, y1)
+
+            # Precise coordinate conversion
+            orig_x = int(round(x0 * img_w / canvas_w))
+            orig_y = int(round(y0 * img_h / canvas_h))
+            orig_w = max(1, int(round(w * img_w / canvas_w)))
+            orig_h = max(1, int(round(h * img_h / canvas_h)))
+            orig_x = max(0, min(img_w - 1, orig_x))
+            orig_y = max(0, min(img_h - 1, orig_y))
+            orig_w = min(img_w - orig_x, orig_w)
+            orig_h = min(img_h - orig_y, orig_h)
+
+            area = [bounds[0] + orig_x, bounds[1] + orig_y, orig_w, orig_h]
+            selected_area[0] = area
+            info_label.configure(text=f"เลือก: X={area[0]}, Y={area[1]}, กว้าง={orig_w}, สูง={orig_h} px")
+            confirm_btn.configure(state="normal")
+
+        def confirm(event=None):
+            area = selected_area[0]
+            if not area:
+                return
             if name == "template":
                 try:
-                    crop = image[int(y / scale):int(y / scale) + area[3], int(x / scale):int(x / scale) + area[2]]
+                    crop_x = area[0] - bounds[0]
+                    crop_y = area[1] - bounds[1]
+                    crop = image[crop_y : crop_y + area[3], crop_x : crop_x + area[2]]
                     if cv2 is not None:
                         TEMPLATE_FILE.parent.mkdir(parents=True, exist_ok=True)
                         cv2.imwrite(str(TEMPLATE_FILE), crop)
@@ -1075,10 +1313,41 @@ class FishingApp:
             else:
                 self.settings.setdefault("rois", {})[name] = area
                 self._set_status(f"เลือกพื้นที่ {area_names.get(name, name)} แล้ว")
-            picker.after(250, picker.destroy)
+            self._update_readiness()
+            picker.destroy()
+
+        def cancel(event=None):
+            if is_dragging[0]:
+                is_dragging[0] = False
+                start[0] = None
+                clear_overlay()
+                confirm_btn.configure(state="disabled")
+                info_label.configure(text="ยกเลิกการลากแล้ว — ลากใหม่เพื่อเลือก")
+            elif selected_area[0] is not None:
+                current_rect[0] = None
+                selected_area[0] = None
+                clear_overlay()
+                confirm_btn.configure(state="disabled")
+                info_label.configure(text="ล้างกรอบเดิมแล้ว — ลากใหม่เพื่อเลือก หรือกด Esc อีกครั้งเพื่อปิด")
+            else:
+                picker.destroy()
+
         canvas.bind("<ButtonPress-1>", down)
+        canvas.bind("<B1-Motion>", motion)
         canvas.bind("<ButtonRelease-1>", up)
-        self.ttk.Button(picker, text="ยกเลิก", command=picker.destroy).pack(anchor="e", padx=10, pady=(4, 8))
+        picker.bind("<Escape>", cancel)
+        picker.bind("<Return>", confirm)
+
+        bottom_bar = self.ttk.Frame(picker, padding=(10, 6, 10, 8))
+        bottom_bar.pack(fill="x")
+        info_label = self.ttk.Label(bottom_bar, text="คลิกค้างแล้วลากเพื่อเลือกพื้นที่", style="Card.TLabel")
+        info_label.pack(side="left", padx=4)
+
+        btn_box = self.ttk.Frame(bottom_bar)
+        btn_box.pack(side="right")
+        self.ttk.Button(btn_box, text="ยกเลิก (Esc)", command=cancel).pack(side="right", padx=(6, 0))
+        confirm_btn = self.ttk.Button(btn_box, text="ใช้พื้นที่นี้ (Enter)", style="Start.TButton", state="disabled", command=confirm)
+        confirm_btn.pack(side="right")
 
     def _settings(self):
         return validate_settings(self._read_ui(), primary_screen_bounds())
@@ -1210,7 +1479,7 @@ class FishingApp:
         if self.stop_requested.is_set():
             self.stop("หยุดฉุกเฉินด้วย F8")
             return
-        now = time.monotonic()
+        capture_time = time.monotonic()
         try:
             if window_snapshot() != self.target:
                 observation = None
@@ -1228,12 +1497,21 @@ class FishingApp:
             if self.stop_requested.is_set():
                 self.stop("หยุดฉุกเฉินด้วย F8")
                 return
-            action = self.controller.step(now, observation, focused)
+            now = time.monotonic()
+            action = self.controller.step(now, observation, focused, capture_time=capture_time)
             if not apply_action(action, self.target):
                 self.controller.stop("target window moved or pointer left it")
             elapsed = now - self.fps_started
             fps = self.fps_count / elapsed if elapsed > 0 else 0.0
-            self._set_status(f"{self.controller.state}: {self.controller.reason or 'tracking'} | {fps:.1f} FPS")
+            if self.settings.get("debug") and getattr(self.controller, "telemetry", None) and self.controller.state == "Track":
+                t = self.controller.telemetry
+                self._set_status(
+                    f"[ดีบัก] ช่อง:[{t['target_left']:.0f},{t['target_right']:.0f}] กลาง:{t['target_center']:.0f} "
+                    f"• ตัวชี้:{t['marker_x']:.0f} คาดการณ์:{t['predicted_x']:.0f} v:{t['velocity']:+.0f}px/s "
+                    f"• หน่วง:{t['total_latency_ms']:.0f}ms (ภาพ:{t['frame_age_ms']:.0f}ms) • สั่ง:{t['action']}"
+                )
+            else:
+                self._set_status(f"{self.controller.state}: {self.controller.reason or 'tracking'} | {fps:.1f} FPS")
             if self.controller.state == "Paused":
                 self.stop()
                 return
@@ -1324,5 +1602,40 @@ def main() -> None:
     root.mainloop()
 
 
+def _bootstrap() -> None:
+    """Ensure .venv and .runtime/usr/lib (bundled Tk) are active when executed directly."""
+    import sys
+    if os.environ.get("_AUTO_FISHING_REEXEC") == "1":
+        return
+    runtime_lib = ROOT / ".runtime" / "usr" / "lib"
+    venv_py = ROOT / ".venv" / "bin" / "python"
+    need_reexec = False
+    new_env = dict(os.environ)
+
+    if runtime_lib.is_dir():
+        ld_path = new_env.get("LD_LIBRARY_PATH", "")
+        if str(runtime_lib) not in ld_path.split(":"):
+            new_env["LD_LIBRARY_PATH"] = f"{runtime_lib}:{ld_path}" if ld_path else str(runtime_lib)
+            new_env["TK_LIBRARY"] = str(runtime_lib / "tk8.6")
+            need_reexec = True
+
+    target_py = sys.executable
+    if venv_py.is_file():
+        try:
+            if Path(sys.executable).resolve() != venv_py.resolve():
+                target_py = str(venv_py)
+                need_reexec = True
+        except Exception:
+            pass
+
+    if need_reexec:
+        new_env["_AUTO_FISHING_REEXEC"] = "1"
+        try:
+            os.execve(target_py, [target_py] + sys.argv, new_env)
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
+    _bootstrap()
     main()

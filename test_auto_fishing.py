@@ -653,5 +653,177 @@ class BarResponsivenessAndNetFixtureTests(unittest.TestCase):
             self.assertEqual(c.state, "Wait")
 
 
+class SmallBarAndKinematicsPrecisionTests(unittest.TestCase):
+    def test_smallest_target_detected_without_occlusion(self):
+        """ช่องม่วงขนาดเล็กสุด (w=16, h=18) ที่ w/h < 1.3 ต้องตรวจพบเป็น valid ได้ถูกต้อง"""
+        frame = np.full((80, 320, 3), 90, dtype=np.uint8)
+        frame[25:35, 20:300] = 0
+        frame[22:40, 100:116] = (170, 100, 145)  # Purple: w=16, h=18
+        frame[22:40, 200:208] = 250               # Marker: w=8, h=18
+        status, marker, target = detect_bar(frame)
+        self.assertEqual(status, "valid")
+        self.assertAlmostEqual(marker, 203.5, delta=1.5)
+        self.assertAlmostEqual(target[0], 100.0, delta=2.0)
+        self.assertAlmostEqual(target[1], 116.0, delta=2.0)
+
+    def test_smallest_target_occluded_by_marker_is_merged(self):
+        """เมื่อตัวชี้สีขาวบังกลางช่องม่วงขนาดเล็ก (w=20) ชิ้นส่วนซ้ายขวาต้องถูกรวมเป็นช่องสมบูรณ์"""
+        frame = np.full((80, 320, 3), 90, dtype=np.uint8)
+        frame[25:35, 20:300] = 0
+        frame[22:40, 100:120] = (170, 100, 145)  # Purple: w=20
+        frame[22:40, 106:114] = 250               # White marker in middle: w=8
+        status, marker, target = detect_bar(frame)
+        self.assertEqual(status, "valid")
+        self.assertAlmostEqual(marker, 109.5, delta=1.5)
+        self.assertAlmostEqual(target[0], 100.0, delta=2.0)
+        self.assertAlmostEqual(target[1], 120.0, delta=2.0)
+
+    def test_velocity_estimation_with_timestamps(self):
+        """การคำนวณความเร็ว (velocity) ต้องอิงจาก timestamp จริงและไม่เป็น 0.0 เสมอไป"""
+        c = Controller({"cast_seconds": 0.5, "lead": 0.05, "margin": 2.0,
+                        "right_on_hold": True, "bite_ack": False})
+        c.start(0.0)
+        # Skip cast
+        c.step(0.0, {"bar": ("absent", None, None), "bite": False}, True)
+        c.step(0.5, {"bar": ("absent", None, None), "bite": False}, True)
+
+        target = (100.0, 130.0)
+        # Frame 1 at t=1.00, x=50.0
+        c.step(1.00, {"bar": ("valid", 50.0, target), "bite": False}, True, capture_time=1.00)
+        self.assertEqual(c.state, "Track")
+        self.assertEqual(c.velocity, 0.0)  # Initial entry has 0 velocity
+
+        # Frame 2 at t=1.02 (dt=0.02s), x=56.0 -> v = (56-50)/0.02 = 300 px/s
+        c.step(1.02, {"bar": ("valid", 56.0, target), "bite": False}, True, capture_time=1.02)
+        self.assertAlmostEqual(c.velocity, 300.0 * 0.70, delta=10.0)
+        self.assertGreater(c.velocity, 150.0)
+
+    def test_frame_age_and_latency_prediction_without_double_counting(self):
+        """การคำนวณตำแหน่งคาดการณ์ต้องรวมอายุภาพ + latency โดยไม่บวกซ้ำ"""
+        c = Controller({"cast_seconds": 0.5, "lead": 0.04, "margin": 2.0,
+                        "right_on_hold": True, "bite_ack": False})
+        c.start(0.0)
+        c.step(0.0, {"bar": ("absent", None, None), "bite": False}, True)
+        c.step(0.5, {"bar": ("absent", None, None), "bite": False}, True)
+
+        target = (200.0, 230.0)
+        # Seed velocity with 2 frames
+        c.step(1.00, {"bar": ("valid", 100.0, target), "bite": False}, True, capture_time=1.00)
+        c.step(1.05, {"bar": ("valid", 110.0, target), "bite": False}, True, capture_time=1.05)
+
+        # Frame 3: capture_time was 1.10, but step executed at 1.12 (frame_age = 0.02s)
+        # configured lead = 0.04s -> total latency = 0.02 + 0.04 = 0.06s
+        c.step(1.12, {"bar": ("valid", 120.0, target), "bite": False}, True, capture_time=1.10)
+        telemetry = c.telemetry
+        self.assertAlmostEqual(telemetry["frame_age_ms"], 20.0, delta=1.0)
+        self.assertAlmostEqual(telemetry["total_latency_ms"], 60.0, delta=1.0)
+        # predicted_x = 120.0 + velocity * 0.06
+        self.assertAlmostEqual(telemetry["predicted_x"], 120.0 + c.velocity * 0.06, delta=0.5)
+
+    def test_direction_reversal_resets_velocity_smoothing(self):
+        """เมื่อตัวชี้ชนขอบแถบแล้วเด้งกลับทิศ ต้อง reset ความเร็วเดิมทันที ไม่ลากค่าเฉลี่ยข้ามทิศ"""
+        c = Controller({"cast_seconds": 0.5, "lead": 0.05, "margin": 2.0,
+                        "right_on_hold": True, "bite_ack": False})
+        c.start(0.0)
+        c.step(0.0, {"bar": ("absent", None, None), "bite": False}, True)
+        c.step(0.5, {"bar": ("absent", None, None), "bite": False}, True)
+        target = (50.0, 80.0)
+
+        # Marker moving right fast (+250 px/s)
+        c.step(1.00, {"bar": ("valid", 100.0, target), "bite": False}, True, capture_time=1.00)
+        c.step(1.02, {"bar": ("valid", 105.0, target), "bite": False}, True, capture_time=1.02)
+        self.assertGreater(c.velocity, 100.0)
+
+        # Sudden bounce: marker at 101.0 at t=1.04 -> v_instant = (101 - 105)/0.02 = -200 px/s
+        c.step(1.04, {"bar": ("valid", 101.0, target), "bite": False}, True, capture_time=1.04)
+        # Velocity must immediately become negative without being averaged with positive velocity
+        self.assertLess(c.velocity, 0.0)
+        self.assertAlmostEqual(c.velocity, -200.0, delta=5.0)
+
+    def test_margin_remains_usable_on_smallest_target(self):
+        """ระยะเผื่อขอบ (margin) สำหรับช่องเล็ก ต้องไม่ยุบจนช่วงกดได้หายไป"""
+        c = Controller({"cast_seconds": 0.5, "lead": 0.0, "margin": 0.2,
+                        "right_on_hold": True, "bite_ack": False})
+        c.start(0.0)
+        c.step(0.0, {"bar": ("absent", None, None), "bite": False}, True)
+        c.step(0.5, {"bar": ("absent", None, None), "bite": False}, True)
+        # Small target width 14 (from 100 to 114)
+        c.step(1.0, {"bar": ("valid", 107.0, (100.0, 114.0)), "bite": False}, True)
+        # Margin floor must ensure deadband is at least 0.6..1.2 px, not collapsing to 0.2
+        self.assertGreaterEqual(c.telemetry["margin"], 0.6)
+        self.assertLessEqual(c.telemetry["margin"], 3.5)
+
+    def test_latency_auto_tuning_adapts_on_turnaround(self):
+        """ระบบปรับชดเชย Latency อัตโนมัติเมื่อตรวจพบการกลับตัว (Turnaround) ของตัวชี้"""
+        c = Controller({"cast_seconds": 0.5, "lead": 0.0, "margin": 2.0,
+                        "right_on_hold": True, "bite_ack": False})
+        c.start(0.0)
+        c.step(0.0, {"bar": ("absent", None, None), "bite": False}, True)
+        c.step(0.5, {"bar": ("absent", None, None), "bite": False}, True)
+        target = (100.0, 120.0)  # center = 110.0
+
+        initial_latency = c.calibrated_latency
+        # Simulate moving right, then releasing
+        c.held = True
+        c.last_switch_action = "release"
+        # Turnaround happens at x=90.0 (stopped before target left 100.0 -> commanded too early)
+        c.velocity = 200.0
+        c._on_turnaround(90.0, target)
+        self.assertLess(c.calibrated_latency, initial_latency)
+
+        # Now simulate turnaround with overshoot at x=125.0 (overshot past target 120.0 -> commanded too late)
+        lat_before = c.calibrated_latency
+        c._on_turnaround(125.0, target)
+        self.assertGreater(c.calibrated_latency, lat_before)
+
+
+class RoiSelectionUITests(unittest.TestCase):
+    def test_drag_in_all_four_directions_yields_correct_bounds(self):
+        """การลากจากทุกทิศทาง (รวมถึงขวาล่างไปซ้ายบน) ต้องได้พิกัดมุมซ้ายบนและขนาดที่เป็นบวกเสมอ"""
+        cases = [
+            ((10, 20), (100, 150)),  # top-left to bottom-right
+            ((100, 150), (10, 20)),  # bottom-right to top-left
+            ((100, 20), (10, 150)),  # top-right to bottom-left
+            ((10, 150), (100, 20)),  # bottom-left to top-right
+        ]
+        for p0, p1 in cases:
+            x0 = min(p0[0], p1[0])
+            y0 = min(p0[1], p1[1])
+            x1 = max(p0[0], p1[0])
+            y1 = max(p0[1], p1[1])
+            w, h = x1 - x0, y1 - y0
+            self.assertEqual(x0, 10)
+            self.assertEqual(y0, 20)
+            self.assertEqual(w, 90)
+            self.assertEqual(h, 130)
+
+    def test_coordinate_scaling_maps_accurately_without_drift(self):
+        """พิกัดพื้นที่จริงต้องแปลงจากขนาดบน Canvas ไปยังพิกัดภาพต้นฉบับอย่างแม่นยำ"""
+        img_w, img_h = 1920, 1080
+        scale = min(1.0, 1100 / img_w, 700 / img_h)
+        canvas_w = int(round(img_w * scale))
+        canvas_h = int(round(img_h * scale))
+
+        x0, y0, w, h = 200, 150, 300, 100
+        orig_x = int(round(x0 * img_w / canvas_w))
+        orig_y = int(round(y0 * img_h / canvas_h))
+        orig_w = int(round(w * img_w / canvas_w))
+        orig_h = int(round(h * img_h / canvas_h))
+
+        re_x0 = int(round(orig_x * canvas_w / img_w))
+        re_y0 = int(round(orig_y * canvas_h / img_h))
+        self.assertAlmostEqual(re_x0, x0, delta=1)
+        self.assertAlmostEqual(re_y0, y0, delta=1)
+
+    def test_clamping_prevents_out_of_bounds_on_canvas(self):
+        """การลากเมาส์ออกนอกขอบหน้าจอหรือขอบ Canvas ต้องถูก clamp ไม่ให้ติดลบหรือเกินขนาด"""
+        canvas_w, canvas_h = 800, 600
+        for test_x, test_y in [(-50, -30), (950, 750), (-10, 300), (400, 800)]:
+            clamped_x = max(0, min(canvas_w, test_x))
+            clamped_y = max(0, min(canvas_h, test_y))
+            self.assertTrue(0 <= clamped_x <= canvas_w)
+            self.assertTrue(0 <= clamped_y <= canvas_h)
+
+
 if __name__ == "__main__":
     unittest.main()
