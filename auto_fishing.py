@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - pure logic remains usable
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "0.0.3"
+APP_VERSION = "0.0.4"
 
 
 def user_data_dir(system: str | None = None, environ: dict[str, str] | None = None) -> Path:
@@ -1402,7 +1402,7 @@ class FishingApp:
                 self.roi_size_label.configure(text="ขนาดพื้นที่: ยังไม่ได้กำหนด")
             if hasattr(self, "main_action_btn") and not self.running and not getattr(self, "start_pending", False):
                 self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
-                if hasattr(self, "action_guidance_lbl"):
+                if hasattr(self, "action_guidance_lbl") and self.status_text_lbl.cget("text") != "ข้อผิดพลาด":
                     self.action_guidance_lbl.configure(text="⚠️  กรุณาเลือกพื้นที่บนหน้าจอในขั้นตอนที่ 1 ก่อนเริ่ม", fg="#f59e0b")
 
     def _read_ui(self):
