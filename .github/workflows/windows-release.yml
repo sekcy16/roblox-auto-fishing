@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - "v0.0.1"
+      - "v*"
 
 permissions:
   contents: write
@@ -25,21 +25,21 @@ jobs:
       - name: Run tests
         run: python -m unittest test_auto_fishing test_desktop_control -v
       - name: Build executable
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.1 --version-file windows-version-info.txt auto_fishing.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.2 --version-file windows-version-info.txt auto_fishing.py
       - name: Create ZIP
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force release/RobloxAutoFishing-v0.0.1
-          Copy-Item dist/RobloxAutoFishing-v0.0.1.exe release/RobloxAutoFishing-v0.0.1/
-          Copy-Item WINDOWS-README.txt release/RobloxAutoFishing-v0.0.1/
-          Compress-Archive -Force release/RobloxAutoFishing-v0.0.1/* release/RobloxAutoFishing-v0.0.1.zip
+          New-Item -ItemType Directory -Force release/RobloxAutoFishing-v0.0.2
+          Copy-Item dist/RobloxAutoFishing-v0.0.2.exe release/RobloxAutoFishing-v0.0.2/
+          Copy-Item WINDOWS-README.txt release/RobloxAutoFishing-v0.0.2/
+          Compress-Archive -Force release/RobloxAutoFishing-v0.0.2/* release/RobloxAutoFishing-v0.0.2.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: RobloxAutoFishing-v0.0.1-Windows
-          path: release/RobloxAutoFishing-v0.0.1.zip
+          name: RobloxAutoFishing-v0.0.2-Windows
+          path: release/RobloxAutoFishing-v0.0.2.zip
           if-no-files-found: error
       - name: Publish GitHub Release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$env:GITHUB_REF_NAME" "release/RobloxAutoFishing-v0.0.1.zip" --title "Roblox Auto Fishing 0.0.1" --notes "Windows portable release. Extract the ZIP and open RobloxAutoFishing-v0.0.1.exe."
+        run: gh release create "$env:GITHUB_REF_NAME" "release/RobloxAutoFishing-v0.0.2.zip" --title "Roblox Auto Fishing 0.0.2" --notes "ปรับขั้นตอนตั้งค่าให้ใช้เฉพาะพื้นที่แถบมินิเกมก็เริ่มได้ และแก้โหมดแหให้รอแถบมินิเกมโดยไม่คลิกตามสัญญาณปลา ดาวน์โหลด ZIP แตกไฟล์ แล้วเปิด RobloxAutoFishing-v0.0.2.exe"

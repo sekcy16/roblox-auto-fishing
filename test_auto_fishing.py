@@ -182,7 +182,7 @@ class SettingsCheck(unittest.TestCase):
     def test_windows_user_data_uses_local_appdata(self):
         path = user_data_dir("Windows", {"LOCALAPPDATA": r"C:\Users\Friend\AppData\Local"})
         self.assertEqual(path, Path(r"C:\Users\Friend\AppData\Local") / "RobloxAutoFishing")
-        self.assertEqual(APP_VERSION, "0.0.1")
+        self.assertEqual(APP_VERSION, "0.0.2")
 
     def test_rejects_invalid_numeric_and_roi_settings(self):
         base = {"cast_seconds": 1.0, "lead": 0.08, "margin": 3.0,
@@ -459,35 +459,43 @@ class FishingModeTests(unittest.TestCase):
         self.assertFalse(c3.held)
         self.assertEqual(c3.state, "Paused")
 
-    # 10. ระบบตรวจสอบความพร้อมก่อนเริ่มทำงาน หากไม่มี ROI bite หรือไม่มี bite-template.png ต้องปฏิเสธการเริ่มทำงานและแสดงข้อผิดพลาด
+    # 10. ระบบตรวจสอบความพร้อมก่อนเริ่มทำงาน ต้องมี ROI bar ส่วน ROI bite หรือ bite-template.png เป็นตัวเลือกเสริม
     def test_10_missing_bite_roi_or_template_rejected_before_start(self):
         import auto_fishing
         bounds = (0, 0, 800, 600)
-        # 10a: validate_settings rejects missing bite ROI
-        no_bite_roi = {"cast_seconds": 1.0, "rois": {"bar": [10, 10, 50, 20], "bite": None}}
+        # 10a: validate_settings rejects missing bar ROI
+        no_bar_roi = {"cast_seconds": 1.0, "rois": {"bar": None, "bite": None}}
         with self.assertRaises(ValueError) as ctx:
-            validate_settings(no_bite_roi, bounds)
-        self.assertIn("สัญญาณปลากินเบ็ด", str(ctx.exception))
+            validate_settings(no_bar_roi, bounds)
+        self.assertIn("แถบมินิเกม", str(ctx.exception))
 
-        # 10b: FishingApp._start_now rejects missing bite-template.png
+        # 10b: validate_settings accepts missing bite ROI
+        no_bite_roi = {"cast_seconds": 1.0, "rois": {"bar": [10, 10, 50, 20], "bite": None}}
+        validated = validate_settings(no_bite_roi, bounds)
+        self.assertIsNone(validated["rois"]["bite"])
+
+        # 10c: FishingApp._start_now runs without errors even if bite-template.png is absent
         app = auto_fishing.FishingApp.__new__(auto_fishing.FishingApp)
         app.start_pending = True
         app.pending_start_id = None
         app.target = (1, (0, 0, 800, 600))
         app.settings = {"fishing_mode": "rod", "cast_seconds": 1.0,
-                        "rois": {"bar": [10, 10, 50, 20], "bite": [20, 20, 30, 30]}}
+                        "rois": {"bar": [10, 10, 50, 20], "bite": None}}
         app.stop_requested = mock.Mock()
         app.hotkey_cleanup = None
         app.status = mock.Mock()
         app._set_mode_widgets_state = mock.Mock()
+        app.root = mock.Mock()
 
         with mock.patch.object(auto_fishing, "window_snapshot", return_value=app.target), \
-             mock.patch.object(auto_fishing, "release_mouse"), \
+             mock.patch.object(auto_fishing, "save_settings"), \
+             mock.patch.object(auto_fishing, "register_stop", return_value=lambda: None), \
+             mock.patch.object(auto_fishing, "ScreenCapture"), \
+             mock.patch.object(auto_fishing, "_set_fast_input_timing"), \
              mock.patch.object(Path, "exists", return_value=False):
             app._start_now(app.settings)
-            app.status.set.assert_called()
-            last_status = app.status.set.call_args[0][0]
-            self.assertIn("bite-template.png", last_status)
+            self.assertTrue(app.running)
+            self.assertIsNone(app.template)
 
     def test_mode_selection_saved_and_loaded(self):
         import tempfile
@@ -629,6 +637,20 @@ class BarResponsivenessAndNetFixtureTests(unittest.TestCase):
         self.assertEqual(action, "release")
         self.assertFalse(c.held)
         self.assertEqual(c.state, "End")
+
+    def test_net_mode_ignores_bite_and_never_clicks_in_wait(self):
+        """โหมดแหต้องไม่คลิกเมื่อได้รับสัญญาณ bite ในสถานะ Wait และรอจนกว่ามินิเกมจะปรากฏ"""
+        c = Controller({"fishing_mode": "net", "cast_seconds": 0.5, "lead": 0.0,
+                        "margin": 3.0, "right_on_hold": False, "bite_ack": True})
+        c.start(0.0)
+        c.step(0.0, {"bar": ("absent", None, None), "bite": False}, True)
+        c.step(0.5, {"bar": ("absent", None, None), "bite": False}, True)
+        self.assertEqual(c.state, "Wait")
+        # แม้จะมี bite ติดต่อกัน 10 เฟรม ก็ต้องไม่ส่ง click ออกมา
+        for t in range(6, 16):
+            action = c.step(t * 0.1, {"bar": ("absent", None, None), "bite": True}, True)
+            self.assertEqual(action, "none")
+            self.assertEqual(c.state, "Wait")
 
 
 if __name__ == "__main__":

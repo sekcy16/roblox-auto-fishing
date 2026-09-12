@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - pure logic remains usable
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "0.0.1"
+APP_VERSION = "0.0.2"
 
 
 def user_data_dir(system: str | None = None, environ: dict[str, str] | None = None) -> Path:
@@ -102,8 +102,6 @@ def validate_settings(data: dict[str, Any], screen_bounds: tuple[int, int, int, 
     rois.update(data.get("rois") or {})
     if rois.get("bar") is None:
         raise ValueError("ต้องกำหนดพื้นที่แถบมินิเกม")
-    if rois.get("bite") is None:
-        raise ValueError("ต้องกำหนดพื้นที่สัญญาณปลากินเบ็ด")
     for name, roi in rois.items():
         if roi is None:
             continue
@@ -331,7 +329,8 @@ class Controller:
             if self.bite_clear_streak >= 3:
                 self.bite_latched = False
         if self.state == "Wait":
-            if self.settings.get("bite_ack", True) and self.bite_streak >= 3 and not self.bite_latched:
+            is_net = (self.settings.get("fishing_mode") == "net")
+            if not is_net and self.settings.get("bite_ack", True) and self.bite_streak >= 3 and not self.bite_latched:
                 self.bite_latched = True
                 return "click"
             if status == "valid" and x is not None and target is not None:
@@ -492,7 +491,8 @@ def primary_screen_bounds() -> tuple[int, int, int, int]:
             pass
     try:
         import mss
-        with mss.mss() as capture:
+        mss_cls = getattr(mss, "MSS", getattr(mss, "mss", None))
+        with mss_cls() as capture:
             monitors = capture.monitors
             if len(monitors) > 1:
                 monitor = monitors[1]
@@ -679,7 +679,8 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict[str, Any]:
 class ScreenCapture:
     def __init__(self):
         import mss
-        self._capture = mss.mss()
+        mss_cls = getattr(mss, "MSS", getattr(mss, "mss", None))
+        self._capture = mss_cls()
 
     def grab(self, roi: tuple[int, int, int, int]):
         if np is None:
@@ -806,7 +807,7 @@ class FishingApp:
         self.ttk.Button(row, text="เลือกพื้นที่บนภาพเกม", style="Step.TButton", command=self.select_rois).pack(side="left")
         self.roi_summary = self.ttk.Label(row, text="ยังไม่กำหนดแถบมินิเกม", style="Card.TLabel")
         self.roi_summary.pack(side="left", padx=12)
-        self.ttk.Label(step2, text="จำเป็นต้องกำหนดทั้งแถบมินิเกมและพื้นที่สัญญาณปลากินเบ็ด รวมถึง bite-template.png", style="Card.TLabel").pack(anchor="w", pady=(4, 0))
+        self.ttk.Label(step2, text="กำหนดเฉพาะพื้นที่แถบมินิเกมก็พร้อมเริ่มทำงานได้ทันที (ส่วนสัญญาณปลากินเป็นตัวเลือกเสริม)", style="Card.TLabel").pack(anchor="w", pady=(4, 0))
 
         step3 = self.ttk.LabelFrame(outer, text=" 3  ทดลองก่อนเริ่ม ", style="Card.TLabelframe", padding=(10, 6))
         step3.pack(fill="x", pady=2)
@@ -928,18 +929,13 @@ class FishingApp:
         bar_ready = bool(rois.get("bar"))
         bite_ready = bool(rois.get("bite"))
         template_ready = TEMPLATE_FILE.exists()
-        if bar_ready and bite_ready and template_ready:
+        if bar_ready:
             parts = ["พร้อมเริ่มทำงาน"]
+            if bite_ready and template_ready:
+                parts.append("ตรวจสัญญาณปลากิน")
             if rois.get("cast"):
                 parts.append("แถบเหวี่ยง")
             self.roi_summary.configure(text="  •  ".join(parts))
-        elif bar_ready:
-            missing = []
-            if not bite_ready:
-                missing.append("ขาด ROI bite")
-            if not template_ready:
-                missing.append("ขาด bite-template.png")
-            self.roi_summary.configure(text="ยังไม่พร้อม  •  " + "  •  ".join(missing))
         else:
             self.roi_summary.configure(text="ยังไม่กำหนดแถบมินิเกม")
 
@@ -986,16 +982,35 @@ class FishingApp:
             return
         dialog = self.tk.Toplevel(self.root)
         self.area_dialog = dialog
-        dialog.title("เลือกพื้นที่ทีละส่วน")
+        dialog.title("เลือกพื้นที่ตรวจจับ")
         dialog.transient(self.root)
         dialog.protocol("WM_DELETE_WINDOW", self._close_area_dialog)
         dialog.lift()
         dialog.focus_set()
-        self.ttk.Label(dialog, text="หน้าต่างนี้จะซ่อนก่อนจับภาพใหม่ทุกครั้ง", style="Card.TLabel").pack(padx=12, pady=(12, 6))
-        for name, label in (("bar", "พื้นที่แถบมินิเกม (จำเป็น)"), ("cast", "พื้นที่แถบเหวี่ยงเบ็ด (ตัวเลือกเสริม)"),
-                            ("bite", "พื้นที่ค้นหาสัญญาณปลากินเบ็ด (ตัวเลือกเสริม)"), ("template", "ครอบภาพตัวอย่างสัญญาณ (ตัวเลือกเสริม)")):
-            self.ttk.Button(dialog, text=label, command=lambda n=name: self._begin_area_selection(n)).pack(fill="x", padx=12, pady=3)
-        self.ttk.Button(dialog, text="ปิด", command=self._close_area_dialog).pack(pady=(6, 12))
+        self.ttk.Label(dialog, text="หน้าต่างนี้จะซ่อนก่อนจับภาพใหม่ทุกครั้ง", style="Card.TLabel").pack(padx=16, pady=(12, 8))
+        self.ttk.Button(dialog, text="🎯  เลือกพื้นที่แถบมินิเกม (จำเป็น)",
+                        command=lambda: self._begin_area_selection("bar")).pack(fill="x", padx=16, pady=4)
+        self.ttk.Separator(dialog, orient="horizontal").pack(fill="x", padx=12, pady=10)
+        self.ttk.Label(dialog, text="พื้นที่เพิ่มเติม (ตัวเลือกเสริม):", style="Card.TLabel").pack(anchor="w", padx=16, pady=(0, 4))
+        opt_frame = self.ttk.Frame(dialog, style="Card.TFrame")
+        opt_frame.pack(fill="x", padx=16, pady=2)
+        optional_options = [
+            ("cast", "พื้นที่แถบเหวี่ยงเบ็ด"),
+            ("bite", "พื้นที่ค้นหาสัญญาณปลากินเบ็ด"),
+            ("template", "ครอบภาพตัวอย่างสัญญาณ"),
+        ]
+        combo_labels = [label for _, label in optional_options]
+        opt_combo = self.ttk.Combobox(opt_frame, values=combo_labels, state="readonly", width=25)
+        opt_combo.current(0)
+        opt_combo.pack(side="left", padx=(0, 6))
+
+        def pick_optional():
+            idx = opt_combo.current()
+            if 0 <= idx < len(optional_options):
+                self._begin_area_selection(optional_options[idx][0])
+
+        self.ttk.Button(opt_frame, text="เลือกพื้นที่นี้", command=pick_optional).pack(side="left")
+        self.ttk.Button(dialog, text="ปิด", command=self._close_area_dialog).pack(pady=(14, 12))
 
     def _close_area_dialog(self):
         dialog, self.area_dialog = self.area_dialog, None
@@ -1133,11 +1148,8 @@ class FishingApp:
             if not self.target:
                 raise RuntimeError("กรุณาเลือกหน้าต่างเกมที่โฟกัสอยู่ก่อน")
             settings = self._settings()
-            if not settings["rois"].get("bite"):
-                raise RuntimeError("จำเป็นต้องกำหนดพื้นที่สัญญาณปลากินเบ็ด (ROI bite)")
-            template_path = TEMPLATE_FILE
-            if not template_path.exists():
-                raise RuntimeError("ไม่พบไฟล์ bite-template.png")
+            if not settings["rois"].get("bar"):
+                raise RuntimeError("จำเป็นต้องกำหนดพื้นที่แถบมินิเกม")
             self.start_pending = True
             self._set_mode_widgets_state("disabled")
             self._set_status("สลับไปที่เกมภายใน 3 วินาทีเพื่อเริ่มทำงาน")
@@ -1162,20 +1174,16 @@ class FishingApp:
             self.settings = settings
             self.template = None
             template_path = TEMPLATE_FILE
-            if not template_path.exists():
-                raise RuntimeError("ไม่พบไฟล์ bite-template.png")
-            if cv2 is not None:
-                self.template = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
-            if self.template is None:
-                raise RuntimeError("ไม่สามารถอ่านไฟล์ bite-template.png ได้")
-            if not settings["rois"].get("bite"):
-                raise RuntimeError("จำเป็นต้องกำหนดพื้นที่สัญญาณปลากินเบ็ด (ROI bite)")
-            bite_roi = settings["rois"]["bite"]
-            if (self.template.ndim != 3 or self.template.shape[2] < 3
-                    or self.template.shape[0] > bite_roi[3]
-                    or self.template.shape[1] > bite_roi[2]
-                    or not _has_spatial_variation(self.template)):
-                raise RuntimeError("ภาพตัวอย่างสัญญาณต้องมีรายละเอียดและขนาดไม่เกินพื้นที่สัญญาณปลากินเบ็ด")
+            if settings["rois"].get("bite") and template_path.exists():
+                if cv2 is not None:
+                    self.template = cv2.imread(str(template_path), cv2.IMREAD_COLOR)
+                bite_roi = settings["rois"]["bite"]
+                if (self.template is not None and (
+                        self.template.ndim != 3 or self.template.shape[2] < 3
+                        or self.template.shape[0] > bite_roi[3]
+                        or self.template.shape[1] > bite_roi[2]
+                        or not _has_spatial_variation(self.template))):
+                    self.template = None
             save_settings(settings)
             self.hotkey_cleanup = register_stop(self.stop_requested.set)
             self.controller = Controller(settings)
@@ -1210,7 +1218,8 @@ class FishingApp:
             else:
                 bar = detect_bar(self.capture.grab(self.settings["rois"]["bar"]))
                 bite = False
-                if self.template is not None and self.settings["rois"].get("bite"):
+                mode = self.settings.get("fishing_mode", "rod")
+                if mode != "net" and self.template is not None and self.settings["rois"].get("bite"):
                     bite = detect_bite(self.capture.grab(self.settings["rois"]["bite"]), self.template,
                                        self.settings["bite_threshold"])
                 observation = {"bar": bar, "bite": bite}

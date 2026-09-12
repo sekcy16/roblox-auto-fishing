@@ -24,22 +24,22 @@ if errorlevel 1 (
 .venv-windows\Scripts\python.exe -m unittest test_auto_fishing -v
 if errorlevel 1 goto :failed
 
-.venv-windows\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.1 --version-file windows-version-info.txt auto_fishing.py
+.venv-windows\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.2 --version-file windows-version-info.txt auto_fishing.py
 if errorlevel 1 goto :failed
 
-if exist "release\RobloxAutoFishing-v0.0.1" rmdir /s /q "release\RobloxAutoFishing-v0.0.1"
+if exist "release\RobloxAutoFishing-v0.0.2" rmdir /s /q "release\RobloxAutoFishing-v0.0.2"
 if errorlevel 1 goto :failed
-mkdir "release\RobloxAutoFishing-v0.0.1"
+mkdir "release\RobloxAutoFishing-v0.0.2"
 if errorlevel 1 goto :failed
-copy /y "dist\RobloxAutoFishing-v0.0.1.exe" "release\RobloxAutoFishing-v0.0.1\" >nul
+copy /y "dist\RobloxAutoFishing-v0.0.2.exe" "release\RobloxAutoFishing-v0.0.2\" >nul
 if errorlevel 1 goto :failed
-copy /y "WINDOWS-README.txt" "release\RobloxAutoFishing-v0.0.1\" >nul
+copy /y "WINDOWS-README.txt" "release\RobloxAutoFishing-v0.0.2\" >nul
 if errorlevel 1 goto :failed
-powershell -NoProfile -Command "Compress-Archive -Force -Path 'release\RobloxAutoFishing-v0.0.1\*' -DestinationPath 'release\RobloxAutoFishing-v0.0.1.zip'"
+powershell -NoProfile -Command "Compress-Archive -Force -Path 'release\RobloxAutoFishing-v0.0.2\*' -DestinationPath 'release\RobloxAutoFishing-v0.0.2.zip'"
 if errorlevel 1 goto :failed
 
 echo.
-echo Build complete: release\RobloxAutoFishing-v0.0.1.zip
+echo Build complete: release\RobloxAutoFishing-v0.0.2.zip
 pause
 exit /b 0
 
