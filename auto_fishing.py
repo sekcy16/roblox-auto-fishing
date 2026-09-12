@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - pure logic remains usable
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "0.0.5"
+APP_VERSION = "0.0.6"
 
 
 def user_data_dir(system: str | None = None, environ: dict[str, str] | None = None) -> Path:

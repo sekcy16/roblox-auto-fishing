@@ -1,8 +1,8 @@
-Roblox Auto Fishing — เวอร์ชัน 0.0.5
+Roblox Auto Fishing — เวอร์ชัน 0.0.6
 
 วิธีเปิดใช้งาน
 1. แตกไฟล์ ZIP ก่อนใช้งาน
-2. ดับเบิลคลิก RobloxAutoFishing-v0.0.5.exe
+2. ดับเบิลคลิก RobloxAutoFishing-v0.0.6.exe
 3. เลือกหน้าต่าง Roblox และตั้งพื้นที่ตรวจจับตามลำดับในโปรแกรม
 4. กด F8 เมื่อต้องการหยุดทันที
 

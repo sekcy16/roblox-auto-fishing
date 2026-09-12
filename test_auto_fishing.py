@@ -182,7 +182,7 @@ class SettingsCheck(unittest.TestCase):
     def test_windows_user_data_uses_local_appdata(self):
         path = user_data_dir("Windows", {"LOCALAPPDATA": r"C:\Users\Friend\AppData\Local"})
         self.assertEqual(path, Path(r"C:\Users\Friend\AppData\Local") / "RobloxAutoFishing")
-        self.assertEqual(APP_VERSION, "0.0.5")
+        self.assertEqual(APP_VERSION, "0.0.6")
 
     def test_rejects_invalid_numeric_and_roi_settings(self):
         base = {"cast_seconds": 1.0, "lead": 0.08, "margin": 3.0,
