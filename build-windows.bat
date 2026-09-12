@@ -21,25 +21,25 @@ if errorlevel 1 (
   echo Required Windows GUI libraries are unavailable. Reinstall Python 3.12 with Tcl/Tk enabled.
   goto :failed
 )
-.venv-windows\Scripts\python.exe -m unittest test_auto_fishing -v
+.venv-windows\Scripts\python.exe -m unittest test_auto_fishing test_desktop_control tests.test_ui_redesign -v
 if errorlevel 1 goto :failed
 
-.venv-windows\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.2 --version-file windows-version-info.txt auto_fishing.py
+.venv-windows\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.3 --version-file windows-version-info.txt auto_fishing.py
 if errorlevel 1 goto :failed
 
-if exist "release\RobloxAutoFishing-v0.0.2" rmdir /s /q "release\RobloxAutoFishing-v0.0.2"
+if exist "release\RobloxAutoFishing-v0.0.3" rmdir /s /q "release\RobloxAutoFishing-v0.0.3"
 if errorlevel 1 goto :failed
-mkdir "release\RobloxAutoFishing-v0.0.2"
+mkdir "release\RobloxAutoFishing-v0.0.3"
 if errorlevel 1 goto :failed
-copy /y "dist\RobloxAutoFishing-v0.0.2.exe" "release\RobloxAutoFishing-v0.0.2\" >nul
+copy /y "dist\RobloxAutoFishing-v0.0.3.exe" "release\RobloxAutoFishing-v0.0.3\" >nul
 if errorlevel 1 goto :failed
-copy /y "WINDOWS-README.txt" "release\RobloxAutoFishing-v0.0.2\" >nul
+copy /y "WINDOWS-README.txt" "release\RobloxAutoFishing-v0.0.3\" >nul
 if errorlevel 1 goto :failed
-powershell -NoProfile -Command "Compress-Archive -Force -Path 'release\RobloxAutoFishing-v0.0.2\*' -DestinationPath 'release\RobloxAutoFishing-v0.0.2.zip'"
+powershell -NoProfile -Command "Compress-Archive -Force -Path 'release\RobloxAutoFishing-v0.0.3\*' -DestinationPath 'release\RobloxAutoFishing-v0.0.3-Windows.zip'"
 if errorlevel 1 goto :failed
 
 echo.
-echo Build complete: release\RobloxAutoFishing-v0.0.2.zip
+echo Build complete: release\RobloxAutoFishing-v0.0.3-Windows.zip
 pause
 exit /b 0
 

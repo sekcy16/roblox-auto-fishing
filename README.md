@@ -1,8 +1,8 @@
 # โปรแกรมตกปลาอัตโนมัติ Roblox
 
-เวอร์ชันปัจจุบัน: **0.0.2**
+เวอร์ชันปัจจุบัน: **0.0.3**
 
-ดาวน์โหลดสำหรับ Windows: [GitHub Releases](https://github.com/sekcy16/roblox-auto-fishing/releases/latest)
+ดาวน์โหลดสำหรับ Windows และ Linux: [GitHub Releases](https://github.com/sekcy16/roblox-auto-fishing/releases/latest)
 
 โปรแกรมอ่านภาพหน้าจอและกดเมาส์ซ้ายเพื่อให้ตัวเลื่อนสีขาวอยู่ในช่องม่วง ใช้กับ Linux X11 และมีโค้ดรองรับ Windows โดยต้องเปิดเกมไว้ด้านหน้าและคงตำแหน่งหน้าต่างหลังตั้งค่า
 
@@ -69,10 +69,10 @@ python -m venv .venv
 คัดลอกโปรเจกต์ไปยังเครื่อง Windows ที่ติดตั้ง Python 3.12 แล้วดับเบิลคลิก `build-windows.bat` เมื่อการทดสอบและ Build ผ่าน ไฟล์พร้อมส่งจะอยู่ที่:
 
 ```text
-release\RobloxAutoFishing-v0.0.2.zip
+release\RobloxAutoFishing-v0.0.3-Windows.zip
 ```
 
-ผู้รับแตก ZIP แล้วเปิด `RobloxAutoFishing-v0.0.2.exe` ได้ทันทีโดยไม่ต้องติดตั้ง Python ค่าตั้งและภาพสัญญาณของผู้ใช้ Windows จะอยู่ใน `%LOCALAPPDATA%\RobloxAutoFishing`
+ผู้รับแตก ZIP แล้วเปิด `RobloxAutoFishing-v0.0.3.exe` ได้ทันทีโดยไม่ต้องติดตั้ง Python ค่าตั้งและภาพสัญญาณของผู้ใช้ Windows จะอยู่ใน `%LOCALAPPDATA%\RobloxAutoFishing`
 
 Windows ให้เลือกติดตั้ง Tcl/Tk ในตัวติดตั้ง Python ส่วน Linux ใช้แพ็กเกจ Tk ของดิสโทร รุ่นนี้ไม่รองรับ Wayland และกำหนดพื้นที่ได้เฉพาะจอหลัก
 

@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - pure logic remains usable
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "0.0.2"
+APP_VERSION = "0.0.3"
 
 
 def user_data_dir(system: str | None = None, environ: dict[str, str] | None = None) -> Path:
@@ -804,14 +804,13 @@ class ScreenCapture:
 
 
 class FishingApp:
-    """Small Tkinter controller with frozen-screen ROI selection."""
+    """Modern dark charcoal Tkinter controller with live preview and frozen-screen ROI selection."""
 
     def __init__(self, root):
         import tkinter as tk
         from tkinter import ttk
         self.tk, self.ttk, self.root = tk, ttk, root
         self.root.title(f"Roblox Auto Fishing {APP_VERSION}")
-        self.root.resizable(False, False)
         self.settings = load_settings()
         self.target = None
         self.running = False
@@ -828,6 +827,9 @@ class FishingApp:
         self.template = None
         self.fps_count = 0
         self.fps_started = time.monotonic()
+        self._preview_photo = None
+        self._preview_throttle = 0.0
+        self.advanced_visible = False
         mode = self.settings.get("fishing_mode", "rod")
         if mode not in MODE_CONFIGS:
             mode = "rod"
@@ -842,7 +844,7 @@ class FishingApp:
             "ack": tk.BooleanVar(value=bool(self.settings.get("bite_ack", DEFAULT_SETTINGS["bite_ack"]))),
             "debug": tk.BooleanVar(value=bool(self.settings.get("debug", DEFAULT_SETTINGS.get("debug", False)))),
         }
-        self.status = tk.StringVar(value="พร้อม — เลือกหน้าต่างเกมและพื้นที่ตรวจจับ")
+        self.status = tk.StringVar(value="พร้อม — เลือกพื้นที่บนหน้าจอเพื่อเริ่ม")
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
@@ -863,11 +865,28 @@ class FishingApp:
                 pass
 
     def _build(self):
-        self.root.title(f"ตกปลาอัตโนมัติ Roblox — เวอร์ชัน {APP_VERSION}")
-        self.root.geometry("720x860")
-        self.root.minsize(720, 860)
-        self.root.maxsize(760, 1050)
-        self.advanced_visible = False
+        self.root.title(f"Roblox Auto Fishing — Auto Tracking {APP_VERSION}")
+        self.root.geometry("680x880")
+        self.root.minsize(580, 760)
+        self.root.resizable(True, True)
+
+        # Dark Charcoal Color System
+        BG_DARK = "#121118"
+        BG_CARD = "#1e1b29"
+        BG_CARD_LIGHT = "#272336"
+        BORDER_COLOR = "#322c44"
+        TEXT_MAIN = "#f3f0fb"
+        TEXT_MUTED = "#9d96b0"
+        TEXT_HINT = "#6e6784"
+        PURPLE_PRIMARY = "#7c3aed"
+        PURPLE_HOVER = "#6d28d9"
+        PURPLE_LIGHT = "#a78bfa"
+        GREEN_READY = "#10b981"
+        AMBER_WARN = "#f59e0b"
+        RED_DANGER = "#ef4444"
+
+        self.root.configure(background=BG_DARK)
+
         self.ui_font = "Noto Sans Thai Looped"
         try:
             families = set(self.root.tk.call("font", "families"))
@@ -875,67 +894,221 @@ class FishingApp:
                 self.ui_font = "Noto Sans Thai"
         except Exception:
             self.ui_font = "TkDefaultFont"
+
         style = self.ttk.Style(self.root)
         try:
             style.theme_use("clam")
         except Exception:
             pass
-        style.configure("TFrame", background="#f7f4ff")
-        style.configure("Card.TLabelframe", background="#ffffff", bordercolor="#ded5f3", borderwidth=1, relief="groove")
-        style.configure("Card.TLabelframe.Label", background="#ffffff", foreground="#4b3b76", font=(self.ui_font, 11, "bold"))
-        style.configure("TLabel", background="#f7f4ff", foreground="#30283d", font=(self.ui_font, 11))
-        style.configure("Card.TLabel", background="#ffffff", foreground="#30283d", font=(self.ui_font, 11))
-        style.configure("Card.TFrame", background="#ffffff")
-        style.configure("TCheckbutton", background="#ffffff", font=(self.ui_font, 11))
-        style.configure("TRadiobutton", background="#ffffff", font=(self.ui_font, 11))
-        style.configure("Title.TLabel", background="#f7f4ff", foreground="#3d2c68", font=(self.ui_font, 18, "bold"))
-        style.configure("Subtitle.TLabel", background="#f7f4ff", foreground="#6b607d", font=(self.ui_font, 10))
-        style.configure("Start.TButton", font=(self.ui_font, 13, "bold"), foreground="#ffffff", background="#7452b8", padding=(18, 9))
-        style.configure("Stop.TButton", font=(self.ui_font, 12, "bold"), foreground="#ffffff", background="#b44164", padding=(18, 9))
-        style.configure("Step.TButton", font=(self.ui_font, 10, "bold"), padding=(12, 4))
-        footer = self.ttk.Frame(self.root, style="TFrame", padding=(16, 4, 16, 8))
-        footer.pack(side="bottom", fill="x")
-        self.ttk.Button(footer, text="เริ่มตกปลา", style="Start.TButton", command=self.start).pack(side="left", fill="x", expand=True, padx=(0, 6))
-        self.ttk.Button(footer, text="หยุด  (F8)", style="Stop.TButton", command=self.stop).pack(side="left", fill="x", expand=True, padx=(6, 0))
-        outer = self.ttk.Frame(self.root, padding=(16, 8, 16, 6))
+
+        style.configure("TFrame", background=BG_DARK)
+        style.configure("Card.TLabelframe", background=BG_CARD, bordercolor=BORDER_COLOR, borderwidth=1, relief="groove")
+        style.configure("Card.TLabelframe.Label", background=BG_CARD, foreground=PURPLE_LIGHT, font=(self.ui_font, 11, "bold"))
+        style.configure("TLabel", background=BG_DARK, foreground=TEXT_MAIN, font=(self.ui_font, 11))
+        style.configure("Card.TLabel", background=BG_CARD, foreground=TEXT_MAIN, font=(self.ui_font, 10))
+        style.configure("Card.TFrame", background=BG_CARD)
+        style.configure("TCheckbutton", background=BG_CARD, foreground=TEXT_MAIN, font=(self.ui_font, 10))
+        style.configure("TRadiobutton", background=BG_CARD, foreground=TEXT_MAIN, font=(self.ui_font, 10))
+        style.configure("Title.TLabel", background=BG_DARK, foreground=TEXT_MAIN, font=(self.ui_font, 16, "bold"))
+        style.configure("Subtitle.TLabel", background=BG_DARK, foreground=TEXT_MUTED, font=(self.ui_font, 9))
+        style.configure("TSeparator", background=BORDER_COLOR)
+
+        style.configure("Primary.TButton", font=(self.ui_font, 11, "bold"), foreground="#ffffff", background=PURPLE_PRIMARY, padding=(16, 9))
+        style.map("Primary.TButton", background=[("active", PURPLE_HOVER), ("disabled", "#38304c")], foreground=[("disabled", "#6e6784")])
+
+        style.configure("Danger.TButton", font=(self.ui_font, 11, "bold"), foreground="#ffffff", background="#dc2626", padding=(16, 9))
+        style.map("Danger.TButton", background=[("active", "#b91c1c"), ("disabled", "#38304c")])
+
+        style.configure("Secondary.TButton", font=(self.ui_font, 9, "bold"), foreground=TEXT_MAIN, background=BG_CARD_LIGHT, padding=(10, 5))
+        style.map("Secondary.TButton", background=[("active", "#36314a")])
+
+        style.configure("Start.TButton", font=(self.ui_font, 11, "bold"), foreground="#ffffff", background=PURPLE_PRIMARY, padding=(16, 9))
+        style.configure("Stop.TButton", font=(self.ui_font, 11, "bold"), foreground="#ffffff", background="#dc2626", padding=(16, 9))
+        style.configure("Step.TButton", font=(self.ui_font, 9, "bold"), foreground=TEXT_MAIN, background=BG_CARD_LIGHT, padding=(10, 5))
+
+        # Hotkey support
+        self.root.bind("<F8>", lambda event: self._toggle_start_stop())
+
+        # Responsive scrollable container for narrow/small window support
+        container = self.tk.Frame(self.root, bg=BG_DARK)
+        container.pack(fill="both", expand=True)
+
+        canvas = self.tk.Canvas(container, bg=BG_DARK, highlightthickness=0)
+        scrollbar = self.ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        scrollable_frame = self.tk.Frame(canvas, bg=BG_DARK)
+
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas_window = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        def _on_mousewheel(event):
+            if canvas.winfo_exists():
+                delta = -1 if getattr(event, "delta", 0) < 0 or getattr(event, "num", 0) == 5 else 1
+                canvas.yview_scroll(delta, "units")
+
+        canvas.bind_all("<Button-4>", _on_mousewheel)
+        canvas.bind_all("<Button-5>", _on_mousewheel)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        outer = self.tk.Frame(scrollable_frame, bg=BG_DARK, padx=16, pady=12)
         outer.pack(fill="both", expand=True)
-        self.ttk.Label(outer, text="ตกปลาอัตโนมัติ Roblox", style="Title.TLabel").pack(anchor="w")
-        self.ttk.Label(outer, text="ตั้งค่าให้ครบทีละขั้น แล้วเริ่มทำงานเมื่อเกมอยู่ด้านหน้า", style="Subtitle.TLabel").pack(anchor="w", pady=(0, 6))
 
-        step1 = self.ttk.LabelFrame(outer, text=" 1  เลือกหน้าต่างเกม ", style="Card.TLabelframe", padding=(10, 6))
-        step1.pack(fill="x", pady=2)
-        row = self.ttk.Frame(step1, style="Card.TFrame")
-        row.pack(fill="x")
-        self.ttk.Button(row, text="เลือกหน้าต่างเกม", style="Step.TButton", command=self.select_window).pack(side="left")
-        self.target_summary = self.ttk.Label(row, text="ยังไม่เลือกเกม", style="Card.TLabel")
-        self.target_summary.pack(side="left", padx=12)
-        self.ttk.Label(step1, text="สลับไปที่เกมภายใน 3 วินาทีหลังจากกดปุ่ม", style="Card.TLabel").pack(anchor="w", pady=(4, 0))
+        # 1. Header with dynamic Status Pill
+        header = self.tk.Frame(outer, bg=BG_DARK)
+        header.pack(fill="x", pady=(0, 10))
 
-        step2 = self.ttk.LabelFrame(outer, text=" 2  เลือกพื้นที่ตรวจจับ ", style="Card.TLabelframe", padding=(10, 6))
-        step2.pack(fill="x", pady=2)
-        row = self.ttk.Frame(step2, style="Card.TFrame")
-        row.pack(fill="x")
-        self.ttk.Button(row, text="เลือกพื้นที่บนภาพเกม", style="Step.TButton", command=self.select_rois).pack(side="left")
-        self.roi_summary = self.ttk.Label(row, text="ยังไม่กำหนดแถบมินิเกม", style="Card.TLabel")
-        self.roi_summary.pack(side="left", padx=12)
-        self.ttk.Label(step2, text="กำหนดเฉพาะพื้นที่แถบมินิเกมก็พร้อมเริ่มทำงานได้ทันที (ส่วนสัญญาณปลากินเป็นตัวเลือกเสริม)", style="Card.TLabel").pack(anchor="w", pady=(4, 0))
+        title_box = self.tk.Frame(header, bg=BG_DARK)
+        title_box.pack(side="left", fill="y")
+        self.tk.Label(title_box, text="Roblox Auto Fishing", fg=TEXT_MAIN, bg=BG_DARK,
+                      font=(self.ui_font, 15, "bold")).pack(anchor="w")
+        self.tk.Label(title_box, text="Auto Tracking ช่องม่วง • ตรวจจับความเร็วและชดเชยความหน่วง",
+                      fg=TEXT_MUTED, bg=BG_DARK, font=(self.ui_font, 9)).pack(anchor="w", pady=(2, 0))
 
-        step3 = self.ttk.LabelFrame(outer, text=" 3  ทดลองก่อนเริ่ม ", style="Card.TLabelframe", padding=(10, 6))
-        step3.pack(fill="x", pady=2)
-        actions = self.ttk.Frame(step3, style="Card.TFrame")
-        actions.pack(fill="x")
-        self.ttk.Button(actions, text="ตรวจจับแถบ", style="Step.TButton", command=self.preview).pack(side="left")
-        self.ttk.Button(actions, text="ทดลองกดค้าง 0.1 วินาที", style="Step.TButton", command=self.test_hold).pack(side="left", padx=(8, 0))
-        self.ttk.Label(step3, text="ตรวจภาพก่อน แล้วค่อยทดลองกดค้าง • มีเวลา 3 วินาทีให้กลับเกม", style="Card.TLabel", wraplength=660, justify="left").pack(anchor="w", pady=(5, 0))
+        self.status_pill = self.tk.Frame(header, bg=BG_CARD_LIGHT, padx=10, pady=5,
+                                         highlightthickness=1, highlightbackground=BORDER_COLOR)
+        self.status_pill.pack(side="right", anchor="e")
+        self.status_dot = self.tk.Canvas(self.status_pill, width=10, height=10, bg=BG_CARD_LIGHT, highlightthickness=0)
+        self.status_dot.pack(side="left", padx=(0, 6))
+        self.status_dot_id = self.status_dot.create_oval(1, 1, 9, 9, fill=AMBER_WARN, outline="")
+        self.status_text_lbl = self.tk.Label(self.status_pill, text="ยังไม่ได้เลือกพื้นที่",
+                                             fg=AMBER_WARN, bg=BG_CARD_LIGHT, font=(self.ui_font, 9, "bold"))
+        self.status_text_lbl.pack(side="left")
 
-        step4 = self.ttk.LabelFrame(outer, text=" 4  ตั้งค่าและเริ่มทำงาน ", style="Card.TLabelframe", padding=(10, 6))
-        step4.pack(fill="x", pady=2)
+        # 2. Main Live Preview Card
+        preview_card = self.tk.Frame(outer, bg=BG_CARD, padx=12, pady=10,
+                                     highlightthickness=1, highlightbackground=BORDER_COLOR)
+        preview_card.pack(fill="x", pady=(0, 8))
 
-        mode_frame = self.ttk.Frame(step4, style="Card.TFrame")
-        mode_frame.pack(fill="x", pady=(0, 3))
-        self.ttk.Label(mode_frame, text="ประเภทอุปกรณ์ตกปลา", style="Card.TLabel", font=(self.ui_font, 11, "bold")).pack(anchor="w", pady=(0, 2))
+        prev_hdr = self.tk.Frame(preview_card, bg=BG_CARD)
+        prev_hdr.pack(fill="x", pady=(0, 6))
+        self.tk.Label(prev_hdr, text="ภาพแสดงผลการตรวจจับ (Live Preview)", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 11, "bold")).pack(side="left")
+        self.preview_badge = self.tk.Label(prev_hdr, text="● พักตรวจจับ", fg=TEXT_MUTED, bg=BG_CARD_LIGHT,
+                                           padx=8, pady=2, font=(self.ui_font, 8, "bold"))
+        self.preview_badge.pack(side="right")
+
+        self.preview_canvas = self.tk.Canvas(preview_card, height=140, bg="#15131d",
+                                             highlightthickness=1, highlightbackground="#2e2a3e")
+        self.preview_canvas.pack(fill="x", pady=4)
+
+        prev_footer = self.tk.Frame(preview_card, bg=BG_CARD)
+        prev_footer.pack(fill="x", pady=(4, 0))
+        self.roi_size_label = self.tk.Label(prev_footer, text="ขนาดพื้นที่: ยังไม่ได้กำหนด",
+                                            fg=TEXT_MUTED, bg=BG_CARD, font=(self.ui_font, 9))
+        self.roi_size_label.pack(side="left")
+        self.preview_detection_label = self.tk.Label(prev_footer, text="สถานะ: รอเลือกพื้นที่",
+                                                    fg=TEXT_MUTED, bg=BG_CARD, font=(self.ui_font, 9))
+        self.preview_detection_label.pack(side="right")
+
+        # 3. Control Panel (3 Steps)
+
+        # Step 1: เลือกพื้นที่
+        step1_card = self.tk.Frame(outer, bg=BG_CARD, padx=12, pady=10,
+                                   highlightthickness=1, highlightbackground=BORDER_COLOR)
+        step1_card.pack(fill="x", pady=(0, 8))
+
+        s1_hdr = self.tk.Frame(step1_card, bg=BG_CARD)
+        s1_hdr.pack(fill="x", pady=(0, 6))
+        self.tk.Label(s1_hdr, text="ขั้นตอนที่ 1 : เลือกพื้นที่", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 11, "bold")).pack(side="left")
+        self.roi_summary = self.tk.Label(s1_hdr, text="ยังไม่กำหนดแถบมินิเกม", fg=TEXT_MUTED, bg=BG_CARD,
+                                         font=(self.ui_font, 9))
+        self.roi_summary.pack(side="right")
+
+        s1_row = self.tk.Frame(step1_card, bg=BG_CARD)
+        s1_row.pack(fill="x")
+        self.btn_select_roi = self.ttk.Button(s1_row, text="🎯  เลือกพื้นที่บนหน้าจอ",
+                                              style="Primary.TButton", command=self._quick_select_bar)
+        self.btn_select_roi.pack(side="left", padx=(0, 8))
+
+        self.target_summary = self.tk.Label(s1_row, text="ยังไม่เลือกเกม", fg=TEXT_MAIN, bg=BG_CARD,
+                                            font=(self.ui_font, 10))
+        self.target_summary.pack(side="left", padx=(4, 10))
+
+        self.btn_reselect = self.ttk.Button(s1_row, text="🔄  เลือกใหม่",
+                                            style="Secondary.TButton", command=self._quick_select_bar)
+        self.btn_reselect.pack(side="right", padx=(6, 0))
+
+        self.btn_select_window = self.ttk.Button(s1_row, text="🖥️  หน้าต่างเกม",
+                                                 style="Secondary.TButton", command=self.select_window)
+        self.btn_select_window.pack(side="right")
+
+        # Step 2: ตรวจจับ
+        step2_card = self.tk.Frame(outer, bg=BG_CARD, padx=12, pady=10,
+                                   highlightthickness=1, highlightbackground=BORDER_COLOR)
+        step2_card.pack(fill="x", pady=(0, 8))
+
+        s2_hdr = self.tk.Frame(step2_card, bg=BG_CARD)
+        s2_hdr.pack(fill="x", pady=(0, 6))
+        self.tk.Label(s2_hdr, text="ขั้นตอนที่ 2 : ตรวจจับ", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 11, "bold")).pack(side="left")
+
+        s2_row = self.tk.Frame(step2_card, bg=BG_CARD)
+        s2_row.pack(fill="x")
+
+        self.chip_target = self.tk.Label(s2_row, text="⚪  ช่องม่วง: ยังไม่ตรวจจับ",
+                                         bg=BG_CARD_LIGHT, fg=TEXT_MUTED, padx=10, pady=5,
+                                         font=(self.ui_font, 9, "bold"))
+        self.chip_target.pack(side="left", padx=(0, 8))
+
+        self.chip_marker = self.tk.Label(s2_row, text="⚪  ตัวชี้: ยังไม่ตรวจจับ",
+                                         bg=BG_CARD_LIGHT, fg=TEXT_MUTED, padx=10, pady=5,
+                                         font=(self.ui_font, 9, "bold"))
+        self.chip_marker.pack(side="left", padx=(0, 8))
+
+        self.btn_check_live = self.ttk.Button(s2_row, text="🔍  ตรวจสอบภาพสด",
+                                              style="Secondary.TButton", command=self.preview)
+        self.btn_check_live.pack(side="right")
+
+        # Step 3: เริ่มทำงาน (Fixed position primary button)
+        step3_card = self.tk.Frame(outer, bg=BG_CARD, padx=14, pady=12,
+                                   highlightthickness=1, highlightbackground="#4c3d70")
+        step3_card.pack(fill="x", pady=(0, 8))
+
+        s3_hdr = self.tk.Frame(step3_card, bg=BG_CARD)
+        s3_hdr.pack(fill="x", pady=(0, 6))
+        self.tk.Label(s3_hdr, text="ขั้นตอนที่ 3 : เริ่มทำงาน", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 11, "bold")).pack(side="left")
+        self.tk.Label(s3_hdr, text="กด F8 เพื่อเริ่ม / หยุดทันที", fg=TEXT_MUTED, bg=BG_CARD,
+                      font=(self.ui_font, 9)).pack(side="right")
+
+        self.main_action_btn = self.ttk.Button(step3_card, text="▶  เริ่ม Auto (F8)",
+                                               style="Primary.TButton", command=self._toggle_start_stop)
+        self.main_action_btn.pack(fill="x", pady=(4, 6))
+
+        self.action_guidance_lbl = self.tk.Label(step3_card, text="กรุณาเลือกพื้นที่บนหน้าจอในขั้นตอนที่ 1 ก่อนเริ่ม",
+                                                 fg=AMBER_WARN, bg=BG_CARD, font=(self.ui_font, 10), wraplength=600, justify="left")
+        self.action_guidance_lbl.pack(anchor="w")
+
+        # 4. Collapsible Advanced Settings (Folded by default)
+        adv_card = self.tk.Frame(outer, bg=BG_CARD, padx=12, pady=10,
+                                 highlightthickness=1, highlightbackground=BORDER_COLOR)
+        adv_card.pack(fill="x", pady=(0, 8))
+
+        self.advanced_btn = self.ttk.Button(adv_card, text="⚙️  ตั้งค่าขั้นสูง  ▸",
+                                            style="Secondary.TButton", command=self.toggle_advanced)
+        self.advanced_btn.pack(anchor="w")
+
+        self.advanced_frame = self.tk.Frame(adv_card, bg=BG_CARD)
+
+        # Advanced Settings content
+        mode_box = self.tk.Frame(self.advanced_frame, bg=BG_CARD)
+        mode_box.pack(fill="x", pady=(6, 4))
+        self.tk.Label(mode_box, text="ประเภทอุปกรณ์ตกปลา", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 10, "bold")).pack(anchor="w", pady=(0, 2))
         self.mode_rod_rb = self.ttk.Radiobutton(
-            mode_frame,
+            mode_box,
             text=MODE_CONFIGS["rod"]["description"],
             variable=self.vars["fishing_mode"],
             value="rod",
@@ -943,7 +1116,7 @@ class FishingApp:
         )
         self.mode_rod_rb.pack(anchor="w", padx=4, pady=1)
         self.mode_net_rb = self.ttk.Radiobutton(
-            mode_frame,
+            mode_box,
             text=MODE_CONFIGS["net"]["description"],
             variable=self.vars["fishing_mode"],
             value="net",
@@ -951,46 +1124,183 @@ class FishingApp:
         )
         self.mode_net_rb.pack(anchor="w", padx=4, pady=1)
 
-        self.ttk.Separator(step4, orient="horizontal").pack(fill="x", pady=(3, 6))
+        self.ttk.Separator(self.advanced_frame, orient="horizontal").pack(fill="x", pady=(4, 6))
 
-        tuning = self.ttk.Frame(step4, style="Card.TFrame")
+        tuning = self.tk.Frame(self.advanced_frame, bg=BG_CARD)
         tuning.pack(fill="x")
-        self.ttk.Label(tuning, text="เวลากดค้างตอนเหวี่ยงเบ็ด (วินาที)", style="Card.TLabel").grid(row=0, column=0, sticky="w")
-        cast_box = self.ttk.Combobox(tuning, textvariable=self.vars["cast_seconds"], values=("0.5", "0.8", "1.0", "1.5", "2.0", "3.0"), width=7)
-        cast_box.grid(row=0, column=1, sticky="w", padx=(8, 18))
-        self.ttk.Label(tuning, text="เมื่อกดเมาส์ค้าง ตัวเลื่อนสีขาวไปทาง", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=(5, 0))
-        self.ttk.Radiobutton(tuning, text="ขวา", variable=self.vars["right"], value=True).grid(row=1, column=1, sticky="w", padx=8, pady=(5, 0))
-        self.ttk.Radiobutton(tuning, text="ซ้าย", variable=self.vars["right"], value=False).grid(row=1, column=2, sticky="w", pady=(5, 0))
-        self.advanced_button = self.ttk.Button(step4, text="ตั้งค่าละเอียด  ▸", command=self.toggle_advanced)
-        self.advanced_button.pack(anchor="w", pady=(6, 0))
-        self.advanced_frame = self.ttk.Frame(step4, style="Card.TFrame")
-        self.ttk.Label(self.advanced_frame, text="ระยะเผื่อกลางช่องม่วง (พิกเซล)", style="Card.TLabel").grid(row=0, column=0, sticky="w", pady=2)
-        self.ttk.Entry(self.advanced_frame, textvariable=self.vars["margin"], width=8).grid(row=0, column=1, padx=8)
-        self.ttk.Label(self.advanced_frame, text="ชดเชยการเคลื่อนที่ (วินาที)", style="Card.TLabel").grid(row=0, column=2, sticky="w", pady=2)
-        self.ttk.Entry(self.advanced_frame, textvariable=self.vars["lead"], width=8).grid(row=0, column=3, padx=8)
-        self.ttk.Label(self.advanced_frame, text="ความเข้มงวดสัญญาณ (0–1)", style="Card.TLabel").grid(row=1, column=0, sticky="w", pady=2)
-        self.ttk.Entry(self.advanced_frame, textvariable=self.vars["threshold"], width=8).grid(row=1, column=1, padx=8)
-        self.ttk.Checkbutton(self.advanced_frame, text="คลิกเมื่อปลากินเบ็ด", variable=self.vars["ack"]).grid(row=1, column=2, columnspan=2, sticky="w")
-        self.ttk.Checkbutton(self.advanced_frame, text="แสดงข้อมูลติดตามละเอียด (ดีบัก)", variable=self.vars["debug"]).grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
 
-        status_frame = self.ttk.LabelFrame(outer, text=" สถานะ ", style="Card.TLabelframe", padding=(10, 6))
-        status_frame.pack(fill="x", pady=3)
-        self.ttk.Label(status_frame, textvariable=self.status, style="Card.TLabel", wraplength=660, justify="left").pack(anchor="w", fill="x")
-        self.ttk.Label(status_frame, text="กด F8 เพื่อหยุดระหว่างทำงาน", style="Card.TLabel").pack(anchor="w", pady=(5, 0))
+        self.tk.Label(tuning, text="เวลากดค้างตอนเหวี่ยงเบ็ด (วินาที)", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 10)).grid(row=0, column=0, sticky="w", pady=3)
+        cast_box = self.ttk.Combobox(tuning, textvariable=self.vars["cast_seconds"],
+                                     values=("0.5", "0.8", "1.0", "1.5", "2.0", "3.0"), width=7)
+        cast_box.grid(row=0, column=1, sticky="w", padx=(8, 16), pady=3)
 
+        self.tk.Label(tuning, text="เมื่อกดเมาส์ค้าง ตัวเลื่อนสีขาวไปทาง", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 10)).grid(row=1, column=0, sticky="w", pady=3)
+        dir_frame = self.tk.Frame(tuning, bg=BG_CARD)
+        dir_frame.grid(row=1, column=1, sticky="w", padx=4, pady=3)
+        self.ttk.Radiobutton(dir_frame, text="ขวา", variable=self.vars["right"], value=True).pack(side="left", padx=(0, 8))
+        self.ttk.Radiobutton(dir_frame, text="ซ้าย", variable=self.vars["right"], value=False).pack(side="left")
+
+        self.tk.Label(tuning, text="ระยะเผื่อกลางช่องม่วง (พิกเซล)", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 10)).grid(row=2, column=0, sticky="w", pady=3)
+        self.ttk.Entry(tuning, textvariable=self.vars["margin"], width=8).grid(row=2, column=1, sticky="w", padx=8, pady=3)
+
+        self.tk.Label(tuning, text="ชดเชยการเคลื่อนที่ (วินาที)", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 10)).grid(row=3, column=0, sticky="w", pady=3)
+        self.ttk.Entry(tuning, textvariable=self.vars["lead"], width=8).grid(row=3, column=1, sticky="w", padx=8, pady=3)
+
+        self.tk.Label(tuning, text="ความเข้มงวดสัญญาณปลากิน (0–1)", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 10)).grid(row=4, column=0, sticky="w", pady=3)
+        self.ttk.Entry(tuning, textvariable=self.vars["threshold"], width=8).grid(row=4, column=1, sticky="w", padx=8, pady=3)
+
+        cb_frame = self.tk.Frame(self.advanced_frame, bg=BG_CARD)
+        cb_frame.pack(fill="x", pady=(4, 4))
+        self.ttk.Checkbutton(cb_frame, text="คลิกยืนยันเมื่อปลากินเบ็ด", variable=self.vars["ack"]).pack(anchor="w", pady=1)
+        self.ttk.Checkbutton(cb_frame, text="แสดงข้อมูลติดตามละเอียดบนภาพ Preview (ดีบัก)", variable=self.vars["debug"]).pack(anchor="w", pady=1)
+
+        extra_row = self.tk.Frame(self.advanced_frame, bg=BG_CARD)
+        extra_row.pack(fill="x", pady=(6, 2))
+        self.ttk.Button(extra_row, text="ทดลองกดค้าง 0.1 วินาที", style="Secondary.TButton", command=self.test_hold).pack(side="left")
+        self.ttk.Button(extra_row, text="เลือกพื้นที่เพิ่มเติม...", style="Secondary.TButton", command=self.select_rois).pack(side="right")
+
+        self._draw_preview_placeholder()
         self._update_readiness()
 
     def toggle_advanced(self):
         if self.advanced_visible:
             self.advanced_frame.pack_forget()
-            self.advanced_button.configure(text="ตั้งค่าละเอียด  ▸")
+            self.advanced_btn.configure(text="⚙️  ตั้งค่าขั้นสูง  ▸")
         else:
-            self.advanced_frame.pack(fill="x", pady=(4, 0))
-            self.advanced_button.configure(text="ตั้งค่าละเอียด  ▾")
+            self.advanced_frame.pack(fill="x", pady=(8, 0))
+            self.advanced_btn.configure(text="⚙️  ตั้งค่าขั้นสูง  ▾")
         self.advanced_visible = not self.advanced_visible
-        height = 920 if self.advanced_visible else 860
-        self.root.minsize(720, height)
-        self.root.geometry(f"720x{height}")
+
+    def _toggle_start_stop(self):
+        if self.running or getattr(self, "start_pending", False):
+            self.stop()
+        else:
+            self.start()
+
+    def _quick_select_bar(self):
+        self._begin_area_selection("bar")
+
+    def _draw_preview_placeholder(self):
+        try:
+            self.preview_canvas.delete("all")
+            self.preview_canvas.update_idletasks()
+            w = max(240, self.preview_canvas.winfo_width())
+            h = max(80, self.preview_canvas.winfo_height())
+            cx, cy = w // 2, h // 2
+            self.preview_canvas.create_rectangle(cx - 150, cy - 26, cx + 150, cy + 26,
+                                                 outline="#322c44", dash=(4, 4), width=1)
+            self.preview_canvas.create_text(cx, cy - 6, text="🎯  ยังไม่ได้เลือกพื้นที่แถบมินิเกม",
+                                           fill="#a78bfa", font=(self.ui_font, 10, "bold"))
+            self.preview_canvas.create_text(cx, cy + 13, text="กดปุ่ม 'เลือกพื้นที่บนหน้าจอ' ในขั้นตอนที่ 1 ด้านล่างเพื่อเริ่มต้น",
+                                           fill="#6e6784", font=(self.ui_font, 9))
+            if hasattr(self, "preview_badge"):
+                self.preview_badge.configure(text="● พักตรวจจับ", fg="#9d96b0", bg="#272336")
+        except Exception:
+            pass
+
+    def _update_preview_display(self, crop, detection_result=None):
+        if crop is None or crop.size == 0:
+            self._draw_preview_placeholder()
+            return
+        try:
+            from PIL import Image, ImageTk
+            img_h, img_w = crop.shape[0], crop.shape[1]
+            if detection_result is None:
+                detection_result = detect_bar(crop)
+            det_status, marker, target = detection_result
+
+            # Update Step 2 chips
+            if hasattr(self, "chip_target"):
+                if target is not None:
+                    self.chip_target.configure(text=f"🟣  ช่องม่วง: พบ [{target[0]:.0f}–{target[1]:.0f} px]",
+                                               bg="#2e1065", fg="#d8b4fe")
+                else:
+                    self.chip_target.configure(text="🟡  ช่องม่วง: ยังไม่พบ",
+                                               bg="#451a03", fg="#fbbf24")
+
+            if hasattr(self, "chip_marker"):
+                if marker is not None:
+                    self.chip_marker.configure(text=f"⚪  ตัวชี้: พบ [x={marker:.0f} px]",
+                                               bg="#262335", fg="#ffffff")
+                else:
+                    self.chip_marker.configure(text="🟡  ตัวชี้: ยังไม่พบ",
+                                               bg="#451a03", fg="#fbbf24")
+
+            self.preview_canvas.update_idletasks()
+            canv_w = max(240, self.preview_canvas.winfo_width())
+            canv_h = max(80, self.preview_canvas.winfo_height())
+            self.preview_canvas.delete("all")
+
+            # Scale to fit nicely centered in canvas
+            target_h = min(canv_h - 40, max(28, img_h * 2))
+            scale = target_h / max(1, img_h)
+            disp_w = int(round(img_w * scale))
+            disp_h = int(round(img_h * scale))
+
+            if disp_w > canv_w - 20:
+                scale = (canv_w - 20) / max(1, img_w)
+                disp_w = int(round(img_w * scale))
+                disp_h = int(round(img_h * scale))
+
+            pos_x = (canv_w - disp_w) // 2
+            pos_y = (canv_h - disp_h) // 2
+
+            # Render image
+            rgb = crop[:, :, ::-1] if crop.shape[2] >= 3 else crop
+            pil_img = Image.fromarray(rgb).resize((disp_w, disp_h), Image.Resampling.NEAREST)
+            photo = ImageTk.PhotoImage(pil_img)
+            self._preview_photo = photo
+            self.preview_canvas.create_image(pos_x, pos_y, image=photo, anchor="nw")
+
+            # Minigame bar frame
+            self.preview_canvas.create_rectangle(pos_x - 1, pos_y - 1, pos_x + disp_w, pos_y + disp_h,
+                                                 outline="#3d3752", width=1)
+
+            # Overlay: Purple Target Zone
+            if target is not None:
+                tx0 = pos_x + int(round(target[0] * scale))
+                tx1 = pos_x + int(round(target[1] * scale))
+                t_center = (tx0 + tx1) // 2
+                self.preview_canvas.create_rectangle(tx0, pos_y, tx1, pos_y + disp_h,
+                                                     outline="#a78bfa", width=2)
+                self.preview_canvas.create_text(t_center, pos_y - 9, text="▼ ช่องม่วง",
+                                                fill="#c084fc", font=(self.ui_font, 8, "bold"))
+                self.preview_canvas.create_line(t_center, pos_y, t_center, pos_y + disp_h,
+                                                fill="#38bdf8", dash=(2, 2), width=1)
+
+            # Overlay: White Pointer Marker
+            if marker is not None:
+                mx = pos_x + int(round(marker * scale))
+                self.preview_canvas.create_line(mx, pos_y - 3, mx, pos_y + disp_h + 3,
+                                                fill="#ffffff", width=2)
+                self.preview_canvas.create_polygon(mx - 4, pos_y + disp_h + 8,
+                                                   mx + 4, pos_y + disp_h + 8,
+                                                   mx, pos_y + disp_h + 2,
+                                                   fill="#ffffff")
+                self.preview_canvas.create_text(mx, pos_y + disp_h + 15, text="ตัวชี้",
+                                                fill="#ffffff", font=(self.ui_font, 8, "bold"))
+
+            # Debug Telemetry overlay if enabled
+            if self.vars["debug"].get() and getattr(self, "controller", None) and getattr(self.controller, "telemetry", None):
+                t = self.controller.telemetry
+                dbg_text = f"v={t['velocity']:+.0f}px/s • latency={t['total_latency_ms']:.0f}ms • คำสั่ง={t['action']}"
+                self.preview_canvas.create_text(pos_x, pos_y - 10, text=dbg_text,
+                                                anchor="w", fill="#9d96b0", font=(self.ui_font, 8))
+
+            if hasattr(self, "roi_size_label"):
+                self.roi_size_label.configure(text=f"ขนาดพื้นที่: {img_w} × {img_h} px")
+            if hasattr(self, "preview_detection_label"):
+                status_map = {"valid": "🟢 ตรวจพบแถบและช่องม่วงสมบูรณ์", "absent": "🟡 ตรวจไม่พบเป้าหมาย กำลังค้นหาใหม่", "ambiguous": "⚠️ ภาพไม่ชัดเจน"}
+                self.preview_detection_label.configure(text=status_map.get(det_status, f"สถานะ: {det_status}"))
+            if hasattr(self, "preview_badge"):
+                self.preview_badge.configure(text="● ภาพสด", fg="#34d399", bg="#064e3b")
+        except Exception:
+            pass
 
     def _set_status(self, text):
         state_names = {"Idle": "พร้อม", "Cast": "เหวี่ยงเบ็ด", "Wait": "รอปลา",
@@ -1027,6 +1337,45 @@ class FishingApp:
                 mode_name = MODE_CONFIGS.get(mode, MODE_CONFIGS["rod"])["name"]
                 display = f"โหมด{mode_name}  ·  {state_names[state]}  ·  {detail}"
         self.status.set(display)
+
+        # Update visual status pill and guidance text
+        if hasattr(self, "status_pill") and hasattr(self, "status_text_lbl") and hasattr(self, "status_dot"):
+            if any(k in display for k in ("เริ่มไม่ได้", "เกิดข้อผิดพลาด", "ไม่ได้", "error")):
+                self.status_pill.configure(bg="#450a0a")
+                self.status_dot.configure(bg="#450a0a")
+                self.status_dot.itemconfig(self.status_dot_id, fill="#ef4444")
+                self.status_text_lbl.configure(text="ข้อผิดพลาด", fg="#f87171")
+                if hasattr(self, "action_guidance_lbl"):
+                    self.action_guidance_lbl.configure(text=f"🔴  {display}", fg="#ef4444")
+            elif any(k in display for k in ("กำลังทำงาน", "คุมแถบ", "เหวี่ยงเบ็ด", "รอปลา")):
+                self.status_pill.configure(bg="#064e3b")
+                self.status_dot.configure(bg="#064e3b")
+                self.status_dot.itemconfig(self.status_dot_id, fill="#10b981")
+                self.status_text_lbl.configure(text="กำลังทำงาน", fg="#34d399")
+                if hasattr(self, "action_guidance_lbl"):
+                    self.action_guidance_lbl.configure(text="🟢  กำลังทำงาน: ติดตามช่องม่วงอัตโนมัติ • กด F8 หรือคลิกหยุดเมื่อจบรอบ", fg="#10b981")
+            elif any(k in display for k in ("ตรวจไม่พบเป้าหมาย", "กำลังค้นหาใหม่", "ยังไม่พบแถบ", "สลับไปที่เกม")):
+                self.status_pill.configure(bg="#451a03")
+                self.status_dot.configure(bg="#451a03")
+                self.status_dot.itemconfig(self.status_dot_id, fill="#f59e0b")
+                self.status_text_lbl.configure(text="กำลังค้นหาเป้าหมาย", fg="#fbbf24")
+                if hasattr(self, "action_guidance_lbl"):
+                    self.action_guidance_lbl.configure(text=f"🟡  {display}", fg="#f59e0b")
+            elif any(k in display for k in ("เลือกพื้นที่แล้ว", "พร้อม")):
+                self.status_pill.configure(bg="#064e3b")
+                self.status_dot.configure(bg="#064e3b")
+                self.status_dot.itemconfig(self.status_dot_id, fill="#10b981")
+                self.status_text_lbl.configure(text="พร้อมเริ่ม", fg="#34d399")
+                if hasattr(self, "action_guidance_lbl") and not self.running:
+                    self.action_guidance_lbl.configure(text="🟢  พบช่องม่วงและตัวชี้ พร้อมเริ่ม • กดปุ่มหรือกด F8 (มีเวลา 3 วินาทีสลับเข้าเกม)", fg="#10b981")
+            elif "หยุด" in display:
+                self.status_pill.configure(bg="#272336")
+                self.status_dot.configure(bg="#272336")
+                self.status_dot.itemconfig(self.status_dot_id, fill="#9d96b0")
+                self.status_text_lbl.configure(text="หยุดทำงาน", fg="#9d96b0")
+                if hasattr(self, "action_guidance_lbl"):
+                    self.action_guidance_lbl.configure(text="กดเริ่ม Auto หรือ F8 เพื่อเริ่มต้นใหม่", fg="#9d96b0")
+
         self._update_readiness()
 
     def _update_readiness(self):
@@ -1034,22 +1383,27 @@ class FishingApp:
             return
         if self.target:
             bounds = self.target[1]
-            self.target_summary.configure(text=f"เลือกแล้ว  •  {bounds[2]} × {bounds[3]} px")
+            self.target_summary.configure(text=f"เกม: {bounds[2]} × {bounds[3]} px")
         else:
             self.target_summary.configure(text="ยังไม่เลือกเกม")
+
         rois = self.settings.get("rois", {}) if isinstance(self.settings, dict) else {}
         bar_ready = bool(rois.get("bar"))
-        bite_ready = bool(rois.get("bite"))
-        template_ready = TEMPLATE_FILE.exists()
         if bar_ready:
-            parts = ["พร้อมเริ่มทำงาน"]
-            if bite_ready and template_ready:
-                parts.append("ตรวจสัญญาณปลากิน")
-            if rois.get("cast"):
-                parts.append("แถบเหวี่ยง")
-            self.roi_summary.configure(text="  •  ".join(parts))
+            bar_roi = rois["bar"]
+            self.roi_summary.configure(text=f"แถบมินิเกม: {bar_roi[2]} × {bar_roi[3]} px")
+            if hasattr(self, "roi_size_label"):
+                self.roi_size_label.configure(text=f"ขนาดพื้นที่: {bar_roi[2]} × {bar_roi[3]} px")
+            if hasattr(self, "main_action_btn") and not self.running and not getattr(self, "start_pending", False):
+                self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
         else:
             self.roi_summary.configure(text="ยังไม่กำหนดแถบมินิเกม")
+            if hasattr(self, "roi_size_label"):
+                self.roi_size_label.configure(text="ขนาดพื้นที่: ยังไม่ได้กำหนด")
+            if hasattr(self, "main_action_btn") and not self.running and not getattr(self, "start_pending", False):
+                self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
+                if hasattr(self, "action_guidance_lbl"):
+                    self.action_guidance_lbl.configure(text="⚠️  กรุณาเลือกพื้นที่บนหน้าจอในขั้นตอนที่ 1 ก่อนเริ่ม", fg="#f59e0b")
 
     def _read_ui(self):
         return {
@@ -1098,9 +1452,10 @@ class FishingApp:
         dialog.title("เลือกพื้นที่ตรวจจับ")
         dialog.transient(self.root)
         dialog.protocol("WM_DELETE_WINDOW", self._close_area_dialog)
+        dialog.configure(bg="#121118")
         dialog.lift()
         dialog.focus_set()
-        self.ttk.Label(dialog, text="หน้าต่างนี้จะซ่อนก่อนจับภาพใหม่ทุกครั้ง", style="Card.TLabel").pack(padx=16, pady=(12, 8))
+        self.ttk.Label(dialog, text="เลือกพื้นที่ที่ต้องการกำหนด:", style="Card.TLabel").pack(padx=16, pady=(12, 8))
         self.ttk.Button(dialog, text="🎯  เลือกพื้นที่แถบมินิเกม (จำเป็น)",
                         command=lambda: self._begin_area_selection("bar")).pack(fill="x", padx=16, pady=4)
         self.ttk.Separator(dialog, orient="horizontal").pack(fill="x", padx=12, pady=10)
@@ -1152,13 +1507,22 @@ class FishingApp:
         picker = self.tk.Toplevel(self.root)
         picker.title(f"ลากกรอบพื้นที่ {area_names.get(name, name)}")
         picker.transient(self.root)
-        self.ttk.Label(picker, text="คลิกค้างแล้วลากกรอบให้ครอบส่วนที่ต้องการ • กด Enter เพื่อยืนยัน หรือ Esc เพื่อยกเลิก", style="Card.TLabel").pack(anchor="w", padx=10, pady=(8, 4))
+        picker.configure(bg="#121118")
+
+        # Top instruction banner
+        banner = self.tk.Frame(picker, bg="#1e1b29", padx=14, pady=8)
+        banner.pack(fill="x")
+        self.tk.Label(banner,
+                      text="📌  คลิกค้างแล้วลากเพื่อเลือกพื้นที่ • Esc เพื่อยกเลิก",
+                      fg="#f3f0fb", bg="#1e1b29", font=(self.ui_font, 11, "bold")).pack(side="left")
+
         max_width, max_height = 1100, 700
         img_h, img_w = image.shape[0], image.shape[1]
         scale = min(1.0, max_width / max(1, img_w), max_height / max(1, img_h))
         canvas_w = int(round(img_w * scale))
         canvas_h = int(round(img_h * scale))
-        canvas = self.tk.Canvas(picker, width=canvas_w, height=canvas_h, cursor="crosshair", highlightthickness=0)
+        canvas = self.tk.Canvas(picker, width=canvas_w, height=canvas_h, cursor="crosshair",
+                                highlightthickness=0, bg="#121118")
         canvas.pack()
         try:
             from PIL import Image, ImageTk
@@ -1166,7 +1530,7 @@ class FishingApp:
             canvas.create_image(0, 0, image=photo, anchor="nw")
             canvas._photo = photo
         except Exception:
-            canvas.configure(background="#333")
+            canvas.configure(background="#1a1824")
 
         start = [None]
         is_dragging = [False]
@@ -1174,7 +1538,9 @@ class FishingApp:
         selected_area = [None]
 
         def clear_overlay():
-            canvas.delete("roi_overlay")
+            canvas.delete("roi_dim")
+            canvas.delete("roi_border")
+            canvas.delete("roi_badge")
 
         def draw_selection(x0, y0, x1, y1):
             clear_overlay()
@@ -1182,60 +1548,62 @@ class FishingApp:
             if w <= 0 or h <= 0:
                 return
 
-            # Translucent purple fill so underlying image is still clearly visible
-            canvas.create_rectangle(
-                x0, y0, x1, y1,
-                fill="#8b5cf6",
-                outline="",
-                stipple="gray25",
-                tags="roi_overlay"
-            )
+            # Dimmed effect: Darken area outside the selection box
+            # 1. Top
+            if y0 > 0:
+                canvas.create_rectangle(0, 0, canvas_w, y0, fill="#000000", stipple="gray50", outline="", tags="roi_dim")
+            # 2. Bottom
+            if y1 < canvas_h:
+                canvas.create_rectangle(0, y1, canvas_w, canvas_h, fill="#000000", stipple="gray50", outline="", tags="roi_dim")
+            # 3. Left
+            if x0 > 0:
+                canvas.create_rectangle(0, y0, x0, y1, fill="#000000", stipple="gray50", outline="", tags="roi_dim")
+            # 4. Right
+            if x1 < canvas_w:
+                canvas.create_rectangle(x1, y0, canvas_w, y1, fill="#000000", stipple="gray50", outline="", tags="roi_dim")
 
-            # High-contrast double border visible on both dark and bright backgrounds
-            canvas.create_rectangle(
-                x0, y0, x1, y1,
-                outline="#2e1065",
-                width=3,
-                tags="roi_overlay"
-            )
-            canvas.create_rectangle(
-                x0, y0, x1, y1,
-                outline="#d8b4fe",
-                width=1,
-                tags="roi_overlay"
-            )
+            # High-contrast double purple border visible on both dark and bright backgrounds
+            canvas.create_rectangle(x0, y0, x1, y1, outline="#2e1065", width=3, tags="roi_border")
+            canvas.create_rectangle(x0, y0, x1, y1, outline="#d8b4fe", width=1, tags="roi_border")
 
-            # Size in actual screen pixels
+            # Corner brackets
+            c_len = min(14, max(4, int(min(w, h) / 3)))
+            canvas.create_line(x0, y0 + c_len, x0, y0, x0 + c_len, y0, fill="#c084fc", width=2, tags="roi_border")
+            canvas.create_line(x1 - c_len, y0, x1, y0, x1, y0 + c_len, fill="#c084fc", width=2, tags="roi_border")
+            canvas.create_line(x0, y1 - c_len, x0, y1, x0 + c_len, y1, fill="#c084fc", width=2, tags="roi_border")
+            canvas.create_line(x1 - c_len, y1, x1, y1, x1 - c_len, y1, fill="#c084fc", width=2, tags="roi_border")
+
+            # Actual size in screen pixels
             actual_w = max(1, int(round(w * img_w / canvas_w)))
             actual_h = max(1, int(round(h * img_h / canvas_h)))
             dim_text = f"{actual_w} × {actual_h} px"
 
-            # Position badge near box, guaranteed inside canvas boundaries
-            if y0 >= 24:
-                badge_y = y0 - 12
-            elif y1 <= canvas_h - 24:
-                badge_y = y1 + 12
+            # Badge position near box without clipping
+            if y0 >= 26:
+                badge_y = y0 - 13
+            elif y1 <= canvas_h - 26:
+                badge_y = y1 + 13
             else:
-                badge_y = y0 + 12
+                badge_y = y0 + 13
 
             badge_x = (x0 + x1) / 2.0
-            half_badge = 46.0
+            half_badge = 50.0
             badge_x = max(half_badge + 4, min(canvas_w - half_badge - 4, badge_x))
 
             canvas.create_rectangle(
-                badge_x - half_badge, badge_y - 9,
-                badge_x + half_badge, badge_y + 9,
-                fill="#2e1065",
-                outline="#c084fc",
+                badge_x - half_badge, badge_y - 10,
+                badge_x + half_badge, badge_y + 10,
+                fill="#1e1b29",
+                outline="#8b5cf6",
                 width=1,
-                tags="roi_overlay"
+                tags="roi_badge"
             )
             canvas.create_text(
                 badge_x, badge_y,
                 text=dim_text,
                 fill="#ffffff",
                 font=(self.ui_font, 9, "bold"),
-                tags="roi_overlay"
+                tags="roi_badge"
             )
 
         def down(event):
@@ -1280,7 +1648,6 @@ class FishingApp:
             current_rect[0] = (x0, y0, x1, y1)
             draw_selection(x0, y0, x1, y1)
 
-            # Precise coordinate conversion
             orig_x = int(round(x0 * img_w / canvas_w))
             orig_y = int(round(y0 * img_h / canvas_h))
             orig_w = max(1, int(round(w * img_w / canvas_w)))
@@ -1292,8 +1659,10 @@ class FishingApp:
 
             area = [bounds[0] + orig_x, bounds[1] + orig_y, orig_w, orig_h]
             selected_area[0] = area
-            info_label.configure(text=f"เลือก: X={area[0]}, Y={area[1]}, กว้าง={orig_w}, สูง={orig_h} px")
+            info_label.configure(text=f"เลือก: กว้าง {orig_w} × สูง {orig_h} px")
             confirm_btn.configure(state="normal")
+            # Auto-confirm on mouse release for seamless UX
+            confirm()
 
         def confirm(event=None):
             area = selected_area[0]
@@ -1312,7 +1681,16 @@ class FishingApp:
                 self._set_status("บันทึกภาพตัวอย่างสัญญาณปลากินเบ็ดแล้ว")
             else:
                 self.settings.setdefault("rois", {})[name] = area
-                self._set_status(f"เลือกพื้นที่ {area_names.get(name, name)} แล้ว")
+                save_settings(self.settings)
+                self._set_status("เลือกพื้นที่แล้ว")
+                if name == "bar":
+                    try:
+                        crop_x = max(0, area[0] - bounds[0])
+                        crop_y = max(0, area[1] - bounds[1])
+                        crop = image[crop_y : crop_y + area[3], crop_x : crop_x + area[2]]
+                        self._update_preview_display(crop)
+                    except Exception:
+                        pass
             self._update_readiness()
             picker.destroy()
 
@@ -1323,12 +1701,6 @@ class FishingApp:
                 clear_overlay()
                 confirm_btn.configure(state="disabled")
                 info_label.configure(text="ยกเลิกการลากแล้ว — ลากใหม่เพื่อเลือก")
-            elif selected_area[0] is not None:
-                current_rect[0] = None
-                selected_area[0] = None
-                clear_overlay()
-                confirm_btn.configure(state="disabled")
-                info_label.configure(text="ล้างกรอบเดิมแล้ว — ลากใหม่เพื่อเลือก หรือกด Esc อีกครั้งเพื่อปิด")
             else:
                 picker.destroy()
 
@@ -1338,15 +1710,16 @@ class FishingApp:
         picker.bind("<Escape>", cancel)
         picker.bind("<Return>", confirm)
 
-        bottom_bar = self.ttk.Frame(picker, padding=(10, 6, 10, 8))
+        bottom_bar = self.tk.Frame(picker, bg="#1e1b29", padx=14, pady=8)
         bottom_bar.pack(fill="x")
-        info_label = self.ttk.Label(bottom_bar, text="คลิกค้างแล้วลากเพื่อเลือกพื้นที่", style="Card.TLabel")
-        info_label.pack(side="left", padx=4)
+        info_label = self.tk.Label(bottom_bar, text="คลิกค้างแล้วลากเพื่อเลือกพื้นที่",
+                                   fg="#9d96b0", bg="#1e1b29", font=(self.ui_font, 10))
+        info_label.pack(side="left")
 
-        btn_box = self.ttk.Frame(bottom_bar)
+        btn_box = self.tk.Frame(bottom_bar, bg="#1e1b29")
         btn_box.pack(side="right")
-        self.ttk.Button(btn_box, text="ยกเลิก (Esc)", command=cancel).pack(side="right", padx=(6, 0))
-        confirm_btn = self.ttk.Button(btn_box, text="ใช้พื้นที่นี้ (Enter)", style="Start.TButton", state="disabled", command=confirm)
+        self.ttk.Button(btn_box, text="ยกเลิก (Esc)", style="Secondary.TButton", command=cancel).pack(side="right", padx=(6, 0))
+        confirm_btn = self.ttk.Button(btn_box, text="ใช้พื้นที่นี้ (Enter)", style="Primary.TButton", state="disabled", command=confirm)
         confirm_btn.pack(side="right")
 
     def _settings(self):
@@ -1358,11 +1731,16 @@ class FishingApp:
             return
         try:
             settings = self._settings()
+            if not settings["rois"].get("bar"):
+                self._set_status("ยังไม่ได้กำหนดพื้นที่แถบมินิเกม")
+                return
             cap = ScreenCapture()
-            result = detect_bar(cap.grab(settings["rois"]["bar"]))
+            crop = cap.grab(settings["rois"]["bar"])
+            result = detect_bar(crop)
             cap.close()
-            labels = {"valid": "พบแถบพร้อมติดตาม", "absent": "ยังไม่พบแถบ", "ambiguous": "ภาพไม่ชัดเจน"}
+            labels = {"valid": "พบแถบพร้อมติดตาม", "absent": "ตรวจไม่พบเป้าหมาย กำลังค้นหาใหม่", "ambiguous": "ภาพไม่ชัดเจน"}
             self._set_status(f"ผลตรวจจับ: {labels.get(result[0], result[0])} • ตัวเลื่อน {result[1]} • ช่องเป้าหมาย {result[2]}")
+            self._update_preview_display(crop, result)
         except Exception as exc:
             self._set_status(f"ตรวจจับแถบไม่ได้: {exc}")
 
@@ -1421,11 +1799,15 @@ class FishingApp:
                 raise RuntimeError("จำเป็นต้องกำหนดพื้นที่แถบมินิเกม")
             self.start_pending = True
             self._set_mode_widgets_state("disabled")
+            if hasattr(self, "main_action_btn"):
+                self.main_action_btn.configure(text="■  ยกเลิกเริ่ม (3s...)", style="Danger.TButton")
             self._set_status("สลับไปที่เกมภายใน 3 วินาทีเพื่อเริ่มทำงาน")
             self.pending_start_id = self.root.after(3000, lambda: self._start_now(settings))
         except Exception as exc:
             self._set_mode_widgets_state("normal")
             release_mouse()
+            if hasattr(self, "main_action_btn"):
+                self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
             self._set_status(f"เริ่มไม่ได้: {exc}")
 
     def _start_now(self, settings):
@@ -1461,6 +1843,8 @@ class FishingApp:
             _set_fast_input_timing()
             self.running = True
             self.fps_count, self.fps_started = 0, time.monotonic()
+            if hasattr(self, "main_action_btn"):
+                self.main_action_btn.configure(text="■  หยุด Auto (F8)", style="Danger.TButton")
             mode = settings.get("fishing_mode", "rod")
             mode_name = MODE_CONFIGS.get(mode, MODE_CONFIGS["rod"])["name"]
             self._set_status(f"กำลังทำงาน — โหมด{mode_name} — กด F8 เพื่อหยุดทันที")
@@ -1471,6 +1855,8 @@ class FishingApp:
             if self.hotkey_cleanup:
                 self.hotkey_cleanup()
                 self.hotkey_cleanup = None
+            if hasattr(self, "main_action_btn"):
+                self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
             self._set_status(f"เริ่มไม่ได้: {exc}")
 
     def _pump(self):
@@ -1485,7 +1871,8 @@ class FishingApp:
                 observation = None
                 focused = False
             else:
-                bar = detect_bar(self.capture.grab(self.settings["rois"]["bar"]))
+                bar_image = self.capture.grab(self.settings["rois"]["bar"])
+                bar = detect_bar(bar_image)
                 bite = False
                 mode = self.settings.get("fishing_mode", "rod")
                 if mode != "net" and self.template is not None and self.settings["rois"].get("bite"):
@@ -1494,6 +1881,16 @@ class FishingApp:
                 observation = {"bar": bar, "bite": bite}
                 self.fps_count += 1
                 focused = True
+
+                # Real-time preview update (~6-7 FPS throttled for smooth UI without lagging capture)
+                now_t = time.monotonic()
+                if now_t - self._preview_throttle > 0.15:
+                    self._preview_throttle = now_t
+                    try:
+                        self._update_preview_display(bar_image, bar)
+                    except Exception:
+                        pass
+
             if self.stop_requested.is_set():
                 self.stop("หยุดฉุกเฉินด้วย F8")
                 return
@@ -1510,6 +1907,8 @@ class FishingApp:
                     f"• ตัวชี้:{t['marker_x']:.0f} คาดการณ์:{t['predicted_x']:.0f} v:{t['velocity']:+.0f}px/s "
                     f"• หน่วง:{t['total_latency_ms']:.0f}ms (ภาพ:{t['frame_age_ms']:.0f}ms) • สั่ง:{t['action']}"
                 )
+            elif observation and observation.get("bar") and observation["bar"][0] == "absent" and self.controller.state in ("Track", "End"):
+                self._set_status("ตรวจไม่พบเป้าหมาย กำลังค้นหาใหม่")
             else:
                 self._set_status(f"{self.controller.state}: {self.controller.reason or 'tracking'} | {fps:.1f} FPS")
             if self.controller.state == "Paused":
@@ -1547,6 +1946,8 @@ class FishingApp:
         was_running = self.running
         self.running = False
         self._set_mode_widgets_state("normal")
+        if hasattr(self, "main_action_btn"):
+            self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
         controller = getattr(self, "controller", None)
         previous_reason = controller.reason if controller else ""
         if controller:
