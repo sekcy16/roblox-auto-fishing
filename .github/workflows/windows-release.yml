@@ -16,10 +16,10 @@ jobs:
         include:
           - os: windows-latest
             platform: Windows
-            executable: RobloxAutoFishing-v0.0.4.exe
+            executable: RobloxAutoFishing-v0.0.5.exe
           - os: ubuntu-latest
             platform: Linux
-            executable: RobloxAutoFishing-v0.0.4
+            executable: RobloxAutoFishing-v0.0.5
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -42,29 +42,29 @@ jobs:
         run: xvfb-run -a python -m unittest test_auto_fishing test_desktop_control tests.test_ui_redesign -v
       - name: Build executable
         if: runner.os == 'Windows'
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.4 --version-file windows-version-info.txt auto_fishing.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.5 --version-file windows-version-info.txt auto_fishing.py
       - name: Build executable
         if: runner.os == 'Linux'
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.4 auto_fishing.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.5 auto_fishing.py
       - name: Create Windows ZIP
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force release/RobloxAutoFishing-v0.0.4-Windows
-          Copy-Item dist/${{ matrix.executable }} release/RobloxAutoFishing-v0.0.4-Windows/
-          Copy-Item WINDOWS-README.txt release/RobloxAutoFishing-v0.0.4-Windows/
-          Compress-Archive -Force release/RobloxAutoFishing-v0.0.4-Windows/* release/RobloxAutoFishing-v0.0.4-Windows.zip
+          New-Item -ItemType Directory -Force release/RobloxAutoFishing-v0.0.5-Windows
+          Copy-Item dist/${{ matrix.executable }} release/RobloxAutoFishing-v0.0.5-Windows/
+          Copy-Item WINDOWS-README.txt release/RobloxAutoFishing-v0.0.5-Windows/
+          Compress-Archive -Force release/RobloxAutoFishing-v0.0.5-Windows/* release/RobloxAutoFishing-v0.0.5-Windows.zip
       - name: Create Linux ZIP
         if: runner.os == 'Linux'
         run: |
-          mkdir -p release/RobloxAutoFishing-v0.0.4-Linux
-          cp dist/${{ matrix.executable }} README.md release/RobloxAutoFishing-v0.0.4-Linux/
-          chmod +x release/RobloxAutoFishing-v0.0.4-Linux/${{ matrix.executable }}
-          cd release && zip -r RobloxAutoFishing-v0.0.4-Linux.zip RobloxAutoFishing-v0.0.4-Linux
+          mkdir -p release/RobloxAutoFishing-v0.0.5-Linux
+          cp dist/${{ matrix.executable }} README.md release/RobloxAutoFishing-v0.0.5-Linux/
+          chmod +x release/RobloxAutoFishing-v0.0.5-Linux/${{ matrix.executable }}
+          cd release && zip -r RobloxAutoFishing-v0.0.5-Linux.zip RobloxAutoFishing-v0.0.5-Linux
       - uses: actions/upload-artifact@v4
         with:
-          name: RobloxAutoFishing-v0.0.4-${{ matrix.platform }}
-          path: release/RobloxAutoFishing-v0.0.4-${{ matrix.platform }}.zip
+          name: RobloxAutoFishing-v0.0.5-${{ matrix.platform }}
+          path: release/RobloxAutoFishing-v0.0.5-${{ matrix.platform }}.zip
           if-no-files-found: error
 
   release:
@@ -74,10 +74,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: RobloxAutoFishing-v0.0.4-*
+          pattern: RobloxAutoFishing-v0.0.5-*
           merge-multiple: true
           path: release
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/*.zip --title "Roblox Auto Fishing 0.0.4" --notes "ปรับ UI ให้เข้าใจง่ายขึ้น เพิ่ม Live Preview และกรอบบอกพื้นที่ขณะลาก พร้อมปรับการติดตามช่องม่วงขนาดเล็ก ดาวน์โหลด ZIP ให้ตรงกับ Windows หรือ Linux"
+        run: gh release create "$GITHUB_REF_NAME" release/*.zip --title "Roblox Auto Fishing 0.0.5" --notes "ปรับ UI ให้เข้าใจง่ายขึ้น เพิ่ม Live Preview และกรอบบอกพื้นที่ขณะลาก พร้อมปรับการติดตามช่องม่วงขนาดเล็ก ดาวน์โหลด ZIP ให้ตรงกับ Windows หรือ Linux"

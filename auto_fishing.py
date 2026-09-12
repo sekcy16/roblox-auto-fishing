@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - pure logic remains usable
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "0.0.4"
+APP_VERSION = "0.0.5"
 
 
 def user_data_dir(system: str | None = None, environ: dict[str, str] | None = None) -> Path:
@@ -1337,6 +1337,7 @@ class FishingApp:
                 mode_name = MODE_CONFIGS.get(mode, MODE_CONFIGS["rod"])["name"]
                 display = f"โหมด{mode_name}  ·  {state_names[state]}  ·  {detail}"
         self.status.set(display)
+        self._update_readiness()
 
         # Update visual status pill and guidance text
         if hasattr(self, "status_pill") and hasattr(self, "status_text_lbl") and hasattr(self, "status_dot"):
@@ -1375,9 +1376,6 @@ class FishingApp:
                 self.status_text_lbl.configure(text="หยุดทำงาน", fg="#9d96b0")
                 if hasattr(self, "action_guidance_lbl"):
                     self.action_guidance_lbl.configure(text="กดเริ่ม Auto หรือ F8 เพื่อเริ่มต้นใหม่", fg="#9d96b0")
-
-        self._update_readiness()
-
     def _update_readiness(self):
         if not hasattr(self, "target_summary"):
             return

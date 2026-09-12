@@ -95,6 +95,7 @@ class UiRedesignVerificationTests(unittest.TestCase):
     def test_status_pill_and_guidance_state_transitions(self):
         """การเปลี่ยนสถานะต้องอัปเดต Status Pill และ Action Guidance อย่างสอดคล้อง"""
         app = self.app
+        app.settings["rois"]["bar"] = None
 
         # Error / Blocked state
         app._set_status("เริ่มไม่ได้: กรุณาเลือกหน้าต่างเกม")

@@ -1,6 +1,6 @@
 # โปรแกรมตกปลาอัตโนมัติ Roblox
 
-เวอร์ชันปัจจุบัน: **0.0.4**
+เวอร์ชันปัจจุบัน: **0.0.5**
 
 ดาวน์โหลดสำหรับ Windows และ Linux: [GitHub Releases](https://github.com/sekcy16/roblox-auto-fishing/releases/latest)
 
@@ -69,10 +69,10 @@ python -m venv .venv
 คัดลอกโปรเจกต์ไปยังเครื่อง Windows ที่ติดตั้ง Python 3.12 แล้วดับเบิลคลิก `build-windows.bat` เมื่อการทดสอบและ Build ผ่าน ไฟล์พร้อมส่งจะอยู่ที่:
 
 ```text
-release\RobloxAutoFishing-v0.0.4-Windows.zip
+release\RobloxAutoFishing-v0.0.5-Windows.zip
 ```
 
-ผู้รับแตก ZIP แล้วเปิด `RobloxAutoFishing-v0.0.4.exe` ได้ทันทีโดยไม่ต้องติดตั้ง Python ค่าตั้งและภาพสัญญาณของผู้ใช้ Windows จะอยู่ใน `%LOCALAPPDATA%\RobloxAutoFishing`
+ผู้รับแตก ZIP แล้วเปิด `RobloxAutoFishing-v0.0.5.exe` ได้ทันทีโดยไม่ต้องติดตั้ง Python ค่าตั้งและภาพสัญญาณของผู้ใช้ Windows จะอยู่ใน `%LOCALAPPDATA%\RobloxAutoFishing`
 
 Windows ให้เลือกติดตั้ง Tcl/Tk ในตัวติดตั้ง Python ส่วน Linux ใช้แพ็กเกจ Tk ของดิสโทร รุ่นนี้ไม่รองรับ Wayland และกำหนดพื้นที่ได้เฉพาะจอหลัก
 
