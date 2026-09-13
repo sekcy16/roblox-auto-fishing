@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 import auto_fishing
+import numpy as np
 from auto_fishing import (
     Controller,
     apply_action,
@@ -31,6 +32,20 @@ class TrackRobustnessTests(unittest.TestCase):
             "auto_refocus": False,
             "rois": {"bar": [200, 200, 150, 30], "bite": None},
         }
+
+    @unittest.skipIf(auto_fishing.cv2 is None, "OpenCV unavailable")
+    def test_detector_prefers_white_marker_inside_purple_target(self):
+        image = np.zeros((80, 300, 3), dtype=np.uint8)
+        cv2 = auto_fishing.cv2
+        cv2.rectangle(image, (100, 30), (180, 50), (180, 70, 180), -1)
+        cv2.rectangle(image, (137, 27), (143, 53), (255, 255, 255), -1)
+        cv2.rectangle(image, (240, 27), (246, 53), (255, 255, 255), -1)
+
+        status, marker, target = auto_fishing.detect_bar(image)
+
+        self.assertEqual(status, "valid")
+        self.assertAlmostEqual(marker, 140.0, delta=1.0)
+        self.assertEqual(target, (100.0, 181.0))
 
     # 1. เสียโฟกัสหนึ่งเฟรม: เมาส์ถูกปล่อย, ไม่หยุดถาวร (FocusWait), กลับมาทำงานต่อเอง
     def test_1_momentary_focus_loss_releases_mouse_and_auto_resumes(self):
@@ -227,14 +242,14 @@ class TrackRobustnessTests(unittest.TestCase):
         act = c.step(0.2, obs_valid, True)
         self.assertEqual(c.state, "Track")
 
-        # 1 frame of absent purple bar while focused=True
+        # A short dropout releases safely but remains in Track.
         obs_absent = {"bar": ("absent", None, None), "bite": False}
         act = c.step(0.3, obs_absent, focused=True)
         self.assertEqual(act, "release")
-        self.assertEqual(c.state, "End")
+        self.assertEqual(c.state, "Track")
         self.assertNotIn("focus", c.reason.lower())
 
-        # Purple bar reappears within 1 second -> immediately returns to Track
+        # Purple bar reappears within the grace period -> resumes Track.
         act_resume = c.step(0.5, obs_valid, focused=True)
         self.assertEqual(c.state, "Track")
         self.assertEqual(act_resume, "hold")

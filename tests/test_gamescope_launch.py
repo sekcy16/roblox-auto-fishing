@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import shutil
@@ -10,8 +11,11 @@ from unittest import mock
 if not sys.platform.startswith("linux"):
     raise unittest.SkipTest("Gamescope launch tests require Linux")
 
+ROOT = Path(__file__).resolve().parents[1]
+
 import gamescope_manager as gm
 from auto_fishing import FishingApp
+from ui_linux import configure_sober_low_graphics
 
 
 class LaunchManagerTests(unittest.TestCase):
@@ -84,6 +88,86 @@ class LaunchManagerTests(unittest.TestCase):
 
 
 class LaunchUiTests(unittest.TestCase):
+    def test_low_graphics_update_preserves_header_fps_and_other_settings(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            config = Path(tmp) / "config.json"
+            backup = Path(tmp) / "backup.json"
+            config.write_text(
+                '// Sober settings\n{"fflags": {"DFIntTaskSchedulerTargetFps": 60, "language": "th", "nested": {"keep": true}}}\n',
+                encoding="utf-8",
+            )
+
+            configure_sober_low_graphics(config, backup, refresh_rate=144)
+
+            text = config.read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("// Sober settings\n"))
+            values = json.loads(text[text.index("{"):])
+            self.assertEqual(values["fflags"]["DFIntTaskSchedulerTargetFps"], 144)
+            self.assertEqual(values["fflags"]["language"], "th")
+            self.assertEqual(values["fflags"]["nested"], {"keep": True})
+            self.assertEqual(values["fflags"]["DFIntDebugFRMQualityLevelOverride"], 1)
+            self.assertTrue(values["fflags"]["DFFlagTextureQualityOverrideEnabled"])
+            self.assertEqual(values["fflags"]["DFIntTextureQualityOverride"], 0)
+            self.assertEqual(values["graphics_optimization_mode"], "performance")
+            self.assertEqual(backup.read_text(encoding="utf-8"), '// Sober settings\n{"fflags": {"DFIntTaskSchedulerTargetFps": 60, "language": "th", "nested": {"keep": true}}}\n')
+
+            configure_sober_low_graphics(config, backup, refresh_rate=144)
+            self.assertEqual(backup.read_text(encoding="utf-8"), '// Sober settings\n{"fflags": {"DFIntTaskSchedulerTargetFps": 60, "language": "th", "nested": {"keep": true}}}\n')
+
+    def test_low_graphics_invalid_config_is_unchanged_and_actionable(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+            config = Path(tmp) / "config.json"
+            backup = Path(tmp) / "backup.json"
+            original = "// Sober settings\n{\"fflags\": []}\n"
+            config.write_text(original, encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                configure_sober_low_graphics(config, backup)
+
+            self.assertEqual(config.read_text(encoding="utf-8"), original)
+            self.assertFalse(backup.exists())
+
+    def test_low_graphics_write_failure_prevents_launch(self):
+        app = object.__new__(FishingApp)
+        app.gamescope_launch_pending = False
+        app.spawned_gamescope_proc = None
+        app.settings = {}
+        app._set_status = mock.Mock()
+        app._set_gamescope_launch_button = mock.Mock()
+        app._launch_gamescope_worker = mock.Mock()
+        with mock.patch("ui_linux.configure_sober_low_graphics", side_effect=OSError("read only")), \
+                mock.patch("ui_linux.Path.home", return_value=Path("/tmp")), \
+                mock.patch("ui_linux.gm.is_sober_running", return_value=False):
+            app._launch_gamescope()
+        app._launch_gamescope_worker.assert_not_called()
+        self.assertIn("กราฟิก", app._set_status.call_args.args[0])
+
+    def test_run_configures_low_graphics_with_selected_fps_before_launch(self):
+        app = object.__new__(FishingApp)
+        app.gamescope_launch_pending = False
+        app.spawned_gamescope_proc = None
+        app.settings = {}
+        app.vars = {"gamescope_fps": mock.Mock(), "gamescope_res": mock.Mock(), "gamescope_fullscreen": mock.Mock()}
+        app.vars["gamescope_fps"].get.return_value = "144"
+        app.vars["gamescope_res"].get.return_value = "1280x720"
+        app.vars["gamescope_fullscreen"].get.return_value = False
+        app._set_status = mock.Mock()
+        app._set_gamescope_launch_button = mock.Mock()
+        app.gamescope_status_badge = mock.Mock()
+        app._launch_gamescope_worker = mock.Mock()
+        events = []
+        launch_thread = mock.Mock()
+        with mock.patch("ui_linux.configure_sober_low_graphics") as configure, \
+                mock.patch("ui_linux.gm.is_sober_running", return_value=False), \
+                mock.patch("ui_linux.save_settings"), \
+                mock.patch("ui_linux.threading.Thread", return_value=launch_thread):
+            configure.side_effect = lambda **kwargs: events.append(("config", kwargs))
+            launch_thread.start.side_effect = lambda: events.append(("start", None))
+            app._launch_gamescope()
+        configure.assert_called_once_with(refresh_rate=144)
+        self.assertEqual(events, [("config", {"refresh_rate": 144}), ("start", None)])
+        app._launch_gamescope_worker.assert_not_called()
+
     def test_duplicate_click_while_launching_is_ignored(self):
         app = object.__new__(FishingApp)
         app.gamescope_launch_pending = True

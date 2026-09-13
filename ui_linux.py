@@ -7,9 +7,12 @@ for Sober/Roblox on Linux.
 from __future__ import annotations
 
 import multiprocessing
+import json
 import os
 import platform
+import re
 import sys
+import tempfile
 import threading
 import time
 try:
@@ -21,6 +24,79 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+
+SOBER_CONFIG_RELATIVE_PATH = Path(".var/app/org.vinegarhq.Sober/config/sober/config.json")
+LOW_GRAPHICS_BACKUP_PATH = ROOT / "backups" / "sober-config-before-low.json"
+LOW_GRAPHICS_OVERRIDES = {
+    "DFIntDebugFRMQualityLevelOverride": 1,
+    "DFFlagTextureQualityOverrideEnabled": True,
+    "DFIntTextureQualityOverride": 0,
+}
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write text through a sibling temp file, then replace the destination."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_name, path)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except OSError:
+            pass
+        raise
+
+
+def configure_sober_low_graphics(
+    config_path: Path | None = None,
+    backup_path: Path | None = None,
+    refresh_rate: int | None = None,
+) -> None:
+    """Apply the supported low graphics overrides before launching Sober."""
+    config_path = Path(config_path) if config_path is not None else Path.home() / SOBER_CONFIG_RELATIVE_PATH
+    backup_path = Path(backup_path) if backup_path is not None else LOW_GRAPHICS_BACKUP_PATH
+    if not config_path.is_file():
+        raise ValueError(f"ไม่พบไฟล์ตั้งค่า Sober: {config_path} — เปิด Sober หนึ่งครั้งก่อนลองใหม่")
+
+    original = config_path.read_text(encoding="utf-8")
+    match = re.search(r"(?m)^[ \t]*\{", original)
+    if match is None:
+        raise ValueError("ไฟล์ตั้งค่า Sober ไม่มี JSON ที่อ่านได้")
+    json_start = match.end() - 1
+    try:
+        settings = json.loads(original[json_start:])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"ไฟล์ตั้งค่า Sober ไม่ถูกต้อง: {exc.msg}") from exc
+    if not isinstance(settings, dict):
+        raise ValueError("ไฟล์ตั้งค่า Sober ต้องเป็น JSON object")
+    fflags = settings.get("fflags", {})
+    if not isinstance(fflags, dict):
+        raise ValueError("ไฟล์ตั้งค่า Sober ต้องมี fflags เป็น JSON object")
+    if refresh_rate is not None and (
+        isinstance(refresh_rate, bool) or not isinstance(refresh_rate, int) or not 30 <= refresh_rate <= 360
+    ):
+        raise ValueError("ค่า FPS ต้องอยู่ระหว่าง 30 ถึง 360")
+
+    if backup_path.exists() and not backup_path.is_file():
+        raise OSError(f"ไฟล์สำรองกราฟิกใช้ไม่ได้: {backup_path}")
+    if not backup_path.exists():
+        _atomic_write_text(backup_path, original)
+
+    fflags.update(LOW_GRAPHICS_OVERRIDES)
+    if refresh_rate is not None:
+        fflags["DFIntTaskSchedulerTargetFps"] = refresh_rate
+    settings["fflags"] = fflags
+    settings["graphics_optimization_mode"] = "performance"
+    newline = "\r\n" if "\r\n" in original else "\n"
+    trailing_newline = newline if original.endswith(("\n", "\r")) else ""
+    serialized = json.dumps(settings, ensure_ascii=False, indent=2).replace("\n", newline)
+    updated = original[:json_start] + serialized + trailing_newline
+    _atomic_write_text(config_path, updated)
 
 try:
     import numpy as np
@@ -541,6 +617,24 @@ class LinuxFishingApp(BaseFishingApp):
             self._refresh_gamescope_status()
             return
 
+        selected_fps = None
+        if hasattr(self, "vars") and "gamescope_fps" in self.vars:
+            try:
+                candidate = int(self.vars["gamescope_fps"].get())
+                if 30 <= candidate <= 360:
+                    selected_fps = candidate
+            except (TypeError, ValueError):
+                pass
+
+        try:
+            configure_sober_low_graphics(refresh_rate=selected_fps)
+        except (OSError, ValueError) as exc:
+            self.gamescope_launch_error = str(exc)
+            self._set_status(f"เปิด Sober ไม่ได้: ตั้งค่ากราฟิกต่ำไม่สำเร็จ — {exc}")
+            if hasattr(self, "_update_readiness"):
+                self._update_readiness()
+            return
+
         self.gamescope_launch_pending = True
         self.gamescope_launch_error = None
 
@@ -553,21 +647,6 @@ class LinuxFishingApp(BaseFishingApp):
                     fps_val = int(self.vars["gamescope_fps"].get())
                     self.settings["gamescope_fps"] = fps_val
                     self.settings["linux"]["gamescope_fps"] = fps_val
-                    sober_cfg = Path.home() / ".var/app/org.vinegarhq.Sober/config/sober/config.json"
-                    if sober_cfg.exists():
-                        try:
-                            with open(sober_cfg, "r", encoding="utf-8") as f:
-                                text = f.read()
-                            import re
-                            text = re.sub(
-                                r'"DFIntTaskSchedulerTargetFps":\s*\d+',
-                                f'"DFIntTaskSchedulerTargetFps": {fps_val}',
-                                text,
-                            )
-                            with open(sober_cfg, "w", encoding="utf-8") as f:
-                                f.write(text)
-                        except Exception:
-                            pass
                 except Exception:
                     pass
             if "gamescope_res" in self.vars:

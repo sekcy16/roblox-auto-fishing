@@ -266,8 +266,10 @@ def detect_bar(bgr: Any) -> tuple[str, float | None, tuple[float, float] | None]
                 mx, my, mw, mh = marker
                 y_center_diff = abs((y + h / 2.0) - (my + mh / 2.0))
                 h_diff = abs(h - mh)
-                score = y_center_diff * 2.0 + h_diff
-                matches.append((score, (mx + (mw - 1) / 2.0), (float(x), float(x + w))))
+                marker_center = mx + (mw - 1) / 2.0
+                horizontal_distance = max(float(x) - marker_center, marker_center - float(x + w), 0.0)
+                score = horizontal_distance * 3.0 + y_center_diff * 2.0 + h_diff
+                matches.append((score, marker_center, (float(x), float(x + w))))
 
     if not matches:
         return "absent", None, None
@@ -674,7 +676,10 @@ class Controller:
                 action = "release" if self.held else "none"
                 self.held = False
                 self.actual_held = False
-                self.state, self.absent_started = "End", now
+                if now - self.absent_started < 0.25:
+                    self.reason = "target temporarily lost"
+                    return action
+                self.state = "End"
                 return action
             return self._track_step(now, x, target, capture_time=capture_time)
         return "none"
