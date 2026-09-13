@@ -255,21 +255,32 @@ class GamescopeWorker:
         now = time.monotonic()
         capture_time = now
 
-        # Focus / Target Guard inside Gamescope
+        # Focus / Target Guard inside Gamescope (allow 3-5 frame retries for transient unmap/glitches)
         focused = self.check_target_valid()
         if not focused:
-            self.stop_fishing("target window lost or unmapped inside Gamescope")
+            self.release_mouse()
+            self.target_lost_streak = getattr(self, "target_lost_streak", 0) + 1
+            if self.target_lost_streak >= 5:
+                self.stop_fishing("target window lost or unmapped inside Gamescope")
+                return
+            time.sleep(0.01)
             return
+        self.target_lost_streak = 0
 
         bar_roi = self.settings["rois"]["bar"]
         x, y, w, h = bar_roi
         bar_image = self.grab_window_rect(x, y, w, h)
 
         if bar_image is None:
-            self.controller.stop("window capture failed")
             self.release_mouse()
-            self.stop_fishing("window capture failed")
+            self.capture_fail_streak = getattr(self, "capture_fail_streak", 0) + 1
+            if self.capture_fail_streak >= 5:
+                self.controller.stop("window capture failed")
+                self.stop_fishing("window capture failed")
+                return
+            time.sleep(0.01)
             return
+        self.capture_fail_streak = 0
 
         bar = detect_bar(bar_image)
         bite = False

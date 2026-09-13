@@ -159,6 +159,72 @@ class WindowsUiCapabilityTests(unittest.TestCase):
         self.assertTrue(found_req, "Windows UI must explicitly explain Roblox foreground & mouse sharing requirement")
         self.assertTrue(found_exp, "Windows UI must include the research feasibility notice")
 
+    def test_windows_ui_dual_screen_controls_and_mode_switching(self):
+        app = self.app
+        self.assertTrue(hasattr(app, "mode_desktop_rb"))
+        self.assertTrue(hasattr(app, "mode_dual_rb"))
+        self.assertTrue(hasattr(app, "btn_detect_roblox"))
+        self.assertTrue(hasattr(app, "btn_test_input"))
+
+        # Switch to dual-screen mode
+        app.vars["env_mode"].set("dual_screen")
+        app._on_env_mode_change()
+        self.assertEqual(app.env_mode, "dual_screen")
+        self.assertEqual(app.panel_dual.winfo_manager(), "pack")
+        self.assertEqual(app.panel_desktop.winfo_manager(), "")
+        self.assertIn("จอ 2", app.btn_select_roi.cget("text"))
+
+        # Test window detection with mock
+        mock_win = {
+            "hwnd": 12345,
+            "title": "Roblox",
+            "class_name": "WINDOWSCLIENT",
+            "client_x": 1920,
+            "client_y": 0,
+            "width": 1280,
+            "height": 720,
+            "is_iconic": False,
+        }
+        with mock.patch("ui_windows.find_roblox_windows", return_value=[mock_win]):
+            app._find_and_select_roblox_window()
+            self.assertEqual(app.target_hwnd, 12345)
+            self.assertEqual(app.target_client_size, (1280, 720))
+            self.assertIn("Roblox", app.target_summary.cget("text"))
+            self.assertIn("12345", app.lbl_target_window.cget("text"))
+
+        # Test target validation with mock
+        with mock.patch("ui_windows.get_user32") as mock_u32_getter:
+            mock_u32 = mock.MagicMock()
+            mock_u32.IsWindow.return_value = 1
+            mock_u32.IsIconic.return_value = 0
+            mock_u32.IsWindowVisible.return_value = 1
+
+            def mock_get_rect(hwnd, rect_ptr):
+                rect_ptr.contents.left = 0
+                rect_ptr.contents.top = 0
+                rect_ptr.contents.right = 1280
+                rect_ptr.contents.bottom = 720
+                return 1
+
+            mock_u32.GetClientRect.side_effect = mock_get_rect
+            mock_u32_getter.return_value = mock_u32
+            # Size matches:
+            valid, msg = app._check_target_valid_windows()
+            self.assertTrue(valid)
+
+            # Minimized test:
+            mock_u32.IsIconic.return_value = 1
+            valid_min, msg_min = app._check_target_valid_windows()
+            self.assertFalse(valid_min)
+            self.assertIn("Taskbar", msg_min)
+
+        # Switch back to normal desktop mode
+        app.vars["env_mode"].set("desktop")
+        app._on_env_mode_change()
+        self.assertEqual(app.env_mode, "desktop")
+        self.assertEqual(app.panel_desktop.winfo_manager(), "pack")
+        self.assertEqual(app.panel_dual.winfo_manager(), "")
+
 
 class SettingsNamespaceIsolationTests(unittest.TestCase):
     """Verify settings namespaces never contaminate or overwrite ROIs across platforms."""
@@ -204,6 +270,40 @@ class SettingsNamespaceIsolationTests(unittest.TestCase):
             self.assertEqual(raw_saved["linux"]["desktop_rois"]["bar"], [100, 200, 300, 50])
             # Windows ROI preserved:
             self.assertEqual(raw_saved["windows"]["rois"]["bar"], [100, 200, 300, 50])
+
+
+class WindowsInputScriptTests(unittest.TestCase):
+    """Test Win32 background input helper functions and coordinate encoding."""
+
+    def test_make_lparam_encoding(self):
+        from scripts import test_windows_input as twi
+        lparam = twi.make_lparam(350, 240)
+        expected = ((240 & 0xFFFF) << 16) | (350 & 0xFFFF)
+        self.assertEqual(lparam, expected)
+
+    def test_send_background_click_with_mock_user32(self):
+        from scripts import test_windows_input as twi
+        mock_u32 = mock.MagicMock()
+        mock_u32.IsWindow.return_value = 1
+        mock_u32.PostMessageW.return_value = 1
+
+        with mock.patch.object(twi, "get_user32", return_value=mock_u32):
+            ret = twi.send_background_click(9999, 100, 200, hold_seconds=0.001)
+            self.assertTrue(ret)
+            self.assertEqual(mock_u32.PostMessageW.call_count, 2)
+            # Verify WM_LBUTTONDOWN and WM_LBUTTONUP
+            calls = mock_u32.PostMessageW.call_args_list
+            self.assertEqual(calls[0][0][1], twi.WM_LBUTTONDOWN)
+            self.assertEqual(calls[1][0][1], twi.WM_LBUTTONUP)
+
+    def test_emergency_release_with_mock_user32(self):
+        from scripts import test_windows_input as twi
+        mock_u32 = mock.MagicMock()
+        twi._active_held_hwnd = 8888
+        with mock.patch.object(twi, "get_user32", return_value=mock_u32):
+            twi.emergency_release()
+            mock_u32.PostMessageW.assert_called_once_with(8888, twi.WM_LBUTTONUP, 0, 0)
+            self.assertIsNone(twi._active_held_hwnd)
 
 
 if __name__ == "__main__":

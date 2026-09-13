@@ -6,6 +6,7 @@ send input until the UI or an explicit API call starts it.
 
 from __future__ import annotations
 
+import collections
 import ctypes
 import json
 import math
@@ -74,6 +75,7 @@ DEFAULT_SETTINGS = {
     "bite_threshold": 0.85,
     "bite_ack": True,
     "debug": False,
+    "auto_refocus": False,
     # Platform-specific isolated namespaces
     "windows": {
         "rois": {"bar": None, "bite": None},
@@ -139,7 +141,7 @@ def validate_settings(data: dict[str, Any], screen_bounds: tuple[int, int, int, 
         if not _finite(value) or float(value) < low or (high is not None and float(value) > high):
             raise ValueError(f"ค่า {key} อยู่นอกช่วงที่กำหนด")
         result[key] = float(value)
-    for key in ("right_on_hold", "bite_ack", "debug"):
+    for key in ("right_on_hold", "bite_ack", "debug", "auto_refocus"):
         if key in result and not isinstance(result.get(key), bool):
             raise ValueError(f"ค่า {key} ต้องเป็น true หรือ false")
     rois = dict(DEFAULT_SETTINGS["rois"])
@@ -317,6 +319,10 @@ class Controller:
         self.last_switch_time = None
         self.last_switch_x = None
         self.telemetry: dict[str, Any] = {}
+        self.pre_focus_state = None
+        self.resume_stable_frames = 0
+        self.focus_lost_since = None
+        self.capture_fail_streak = 0
 
     def start(self, now: float) -> None:
         self.state, self.reason = "Cast", ""
@@ -332,11 +338,18 @@ class Controller:
         self.last_switch_time = None
         self.last_switch_x = None
         self.telemetry = {}
+        self.pre_focus_state = None
+        self.resume_stable_frames = 0
+        self.focus_lost_since = None
+        self.capture_fail_streak = 0
 
     def stop(self, reason: str = "stopped by user") -> str:
         action = "release" if self.held else "none"
         self.held = False
         self.state, self.reason = "Paused", reason
+        self.pre_focus_state = None
+        self.resume_stable_frames = 0
+        self.focus_lost_since = None
         return action
 
     def _pause(self, reason: str) -> str:
@@ -456,10 +469,90 @@ class Controller:
     def step(self, now: float, observation: dict[str, Any] | None, focused: bool,
              capture_time: float | None = None) -> str:
         now = float(now)
+
+        # 1. Graceful focus handling: never immediately permanently kill Auto
         if not focused:
-            return self._pause("focus lost; press Start to resume")
+            action = "release" if self.held else "none"
+            self.held = False
+            if self.state not in ("Idle", "Paused", "FocusWait"):
+                self.pre_focus_state = self.state
+                self.state = "FocusWait"
+                self.focus_lost_since = now
+            elif self.focus_lost_since is None and self.state == "FocusWait":
+                self.focus_lost_since = now
+            self.reason = "waiting for game focus"
+            self.previous_x = self.previous_time = None
+            self.velocity = 0.0
+            self.resume_stable_frames = 0
+            return action
+
+        # 2. Resuming from FocusWait when game focus returns
+        if self.state == "FocusWait":
+            self.focus_lost_since = None
+            if observation is None:
+                self.capture_fail_streak += 1
+                if self.capture_fail_streak >= 30:
+                    return self._pause("screen capture failed consistently")
+                return "none"
+            self.capture_fail_streak = 0
+            status, x, target = self._bar(observation)
+            if status == "valid" and x is not None and target is not None:
+                self.resume_stable_frames += 1
+                if self.resume_stable_frames < 2:
+                    # Stabilizing: reset kinematics, do not click or hold on frame 1
+                    self.previous_x = x
+                    self.previous_time = capture_time if capture_time is not None else now
+                    self.velocity = 0.0
+                    self.reason = "resuming track (stabilizing)"
+                    return "none"
+                else:
+                    # At least 2 consecutive valid frames: safely resume tracking
+                    target_state = self.pre_focus_state if self.pre_focus_state in ("Track", "Wait", "End", "Cast") else "Track"
+                    self.state = target_state
+                    self.pre_focus_state = None
+                    self.resume_stable_frames = 0
+                    self.reason = "tracking resumed"
+                    if target_state == "Track":
+                        return self._track_step(now, x, target, capture_time=capture_time)
+                    return "none"
+            else:
+                self.resume_stable_frames = 0
+                if self.pre_focus_state == "Wait":
+                    self.state = "Wait"
+                    self.pre_focus_state = None
+                    self.bite_streak = 0
+                    return "none"
+                elif self.pre_focus_state == "Cast":
+                    self.state = "Cast"
+                    self.pre_focus_state = None
+                    self.cast_started = now
+                    self.held = False
+                    return "none"
+                elif self.pre_focus_state == "End":
+                    self.state = "End"
+                    self.pre_focus_state = None
+                    self.absent_started = now
+                    return "none"
+                else:
+                    if self.absent_started is None:
+                        self.absent_started = now
+                    self.reason = "searching for target"
+                    if now - self.absent_started >= 1.0:
+                        self.pre_focus_state = None
+                        return self._enter_cast(now)
+                    return "none"
+
+        # 3. Screen capture transient failure tolerance
         if observation is None:
-            return self._pause("screen capture failed")
+            action = "release" if self.held else "none"
+            self.held = False
+            self.capture_fail_streak += 1
+            if self.capture_fail_streak >= 30:
+                return self._pause("screen capture failed consistently")
+            self.reason = "screen capture failed (retrying)"
+            return action
+        self.capture_fail_streak = 0
+
         status, x, target = self._bar(observation)
         if self.state in ("Idle", "Paused"):
             return "none"
@@ -555,12 +648,19 @@ def apply_action(action: str, target_snapshot: tuple[int, tuple[int, int, int, i
         if action == "release":
             release_mouse()
             return True
-        if target_snapshot is None or window_snapshot() != target_snapshot:
+        if target_snapshot is None:
             release_mouse()
             return False
+        target_wid, target_bounds = target_snapshot
+        snap = window_snapshot()
+        if snap is None or snap[0] != target_wid:
+            release_mouse()
+            return False
+        current_bounds = snap[1]
         try:
             pyautogui = _load_pyautogui()
-            if not _inside(tuple(pyautogui.position()), target_snapshot[1]):
+            mouse_pos = tuple(pyautogui.position())
+            if not _inside(mouse_pos, current_bounds):
                 release_mouse()
                 return False
             if action == "hold":
@@ -626,6 +726,114 @@ def window_snapshot() -> tuple[int, tuple[int, int, int, int]] | None:
     if platform.system() == "Windows":
         return _windows_snapshot()
     return _x11_snapshot()
+
+
+def is_window_alive(wid: int) -> bool:
+    """Verify whether a window handle or X11 ID is still valid in the OS."""
+    if not wid:
+        return False
+    if platform.system() == "Windows":
+        try:
+            return bool(ctypes.windll.user32.IsWindow(ctypes.c_void_p(wid)))
+        except Exception:
+            return False
+    if not os.environ.get("DISPLAY") or (os.environ.get("WAYLAND_DISPLAY") and os.environ.get("XDG_SESSION_TYPE") == "wayland"):
+        return False
+    try:
+        from Xlib import display
+        dpy = display.Display()
+        client = dpy.create_resource_object("window", wid)
+        _ = client.get_geometry()
+        dpy.close()
+        return True
+    except Exception:
+        return False
+
+
+def get_window_bounds(wid: int) -> tuple[int, int, int, int] | None:
+    """Fetch current bounds (x, y, w, h) of target window from OS."""
+    if not wid:
+        return None
+    if platform.system() == "Windows":
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = ctypes.c_void_p(wid)
+            if not user32.IsWindow(hwnd):
+                return None
+            class POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long),
+                            ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+            rect = RECT()
+            point = POINT()
+            if not user32.GetClientRect(hwnd, ctypes.byref(rect)) or not user32.ClientToScreen(hwnd, ctypes.byref(point)):
+                return None
+            return (int(point.x), int(point.y), int(rect.right - rect.left), int(rect.bottom - rect.top))
+        except Exception:
+            return None
+    if not os.environ.get("DISPLAY") or (os.environ.get("WAYLAND_DISPLAY") and os.environ.get("XDG_SESSION_TYPE") == "wayland"):
+        return None
+    try:
+        from Xlib import display
+        dpy = display.Display()
+        root = dpy.screen().root
+        client = dpy.create_resource_object("window", wid)
+        geometry = client.get_geometry()
+        translated = root.translate_coords(client, 0, 0)
+        result = (int(translated.x), int(translated.y), int(geometry.width), int(geometry.height))
+        dpy.close()
+        return result
+    except Exception:
+        return None
+
+
+def focus_window(wid: int) -> bool:
+    """Request the operating system to bring the target window to foreground."""
+    if not wid:
+        return False
+    if platform.system() == "Windows":
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = ctypes.c_void_p(wid)
+            if not user32.IsWindow(hwnd):
+                return False
+            if user32.IsIconic(hwnd):
+                user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+            return True
+        except Exception:
+            return False
+    if not os.environ.get("DISPLAY") or (os.environ.get("WAYLAND_DISPLAY") and os.environ.get("XDG_SESSION_TYPE") == "wayland"):
+        return False
+    try:
+        from Xlib import X, display, protocol
+        dpy = display.Display()
+        root = dpy.screen().root
+        atom = dpy.intern_atom("_NET_ACTIVE_WINDOW")
+        data = [1, X.CurrentTime, 0, 0, 0]
+        event = protocol.event.ClientMessage(
+            window=wid,
+            client_type=atom,
+            data=(32, data)
+        )
+        root.send_event(event, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask)
+        dpy.flush()
+        dpy.close()
+        return True
+    except Exception:
+        try:
+            subprocess.run(["xdotool", "windowactivate", str(wid)], check=False, timeout=0.5)
+            return True
+        except Exception:
+            return False
+
+
+def _inside_rect(sub_rect: tuple[int, int, int, int] | list[int], parent_rect: tuple[int, int, int, int] | list[int]) -> bool:
+    """Return True if sub_rect is completely enclosed inside parent_rect."""
+    sx, sy, sw, sh = sub_rect
+    px, py, pw, ph = parent_rect
+    return sx >= px and sy >= py and (sx + sw) <= (px + pw) and (sy + sh) <= (py + ph)
 
 
 def primary_screen_bounds() -> tuple[int, int, int, int]:
@@ -922,6 +1130,9 @@ class BaseFishingApp:
         self.controller = None
         self.capture = None
         self.hotkey_cleanup = None
+        self._global_hotkey_cleanup = None
+        self._last_f8_time = 0.0
+        self._closing = False
         self.stop_requested = threading.Event()
         self.start_pending = False
         self.pending_start_id = None
@@ -935,6 +1146,9 @@ class BaseFishingApp:
         self._preview_photo = None
         self._preview_throttle = 0.0
         self.advanced_visible = False
+        self.recent_events = collections.deque(maxlen=20)
+        self._last_auto_refocus_time = 0.0
+        self._relative_rois = {}
         mode = self.settings.get("fishing_mode", "rod")
         if mode not in MODE_CONFIGS:
             mode = "rod"
@@ -943,6 +1157,7 @@ class BaseFishingApp:
         self.status = tk.StringVar(value="พร้อม — เลือกพื้นที่บนหน้าจอเพื่อเริ่ม")
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self._init_global_hotkey()
 
     def _init_vars(self):
         self.vars = {
@@ -954,6 +1169,7 @@ class BaseFishingApp:
             "right": self.tk.BooleanVar(value=bool(self.settings.get("right_on_hold", DEFAULT_SETTINGS["right_on_hold"]))),
             "ack": self.tk.BooleanVar(value=bool(self.settings.get("bite_ack", DEFAULT_SETTINGS["bite_ack"]))),
             "debug": self.tk.BooleanVar(value=bool(self.settings.get("debug", DEFAULT_SETTINGS.get("debug", False)))),
+            "auto_refocus": self.tk.BooleanVar(value=bool(self.settings.get("auto_refocus", False))),
         }
 
     def _on_mode_change(self):
@@ -1064,7 +1280,7 @@ class BaseFishingApp:
         style.configure("Step.TButton", font=(self.ui_font, 9, "bold"), foreground=TEXT_MAIN, background=BG_CARD_LIGHT, padding=(10, 5))
 
         # Hotkey support
-        self.root.bind("<F8>", lambda event: self._toggle_start_stop())
+        self.root.bind("<F8>", lambda event: self._on_f8_pressed())
 
         # Responsive scrollable container for narrow/small window support
         container = self.tk.Frame(self.root, bg=BG_DARK)
@@ -1181,6 +1397,33 @@ class BaseFishingApp:
         self.btn_select_window = self.ttk.Button(s1_row, text="🖥️  หน้าต่างเกม",
                                                  style="Secondary.TButton", command=self.select_window)
         self.btn_select_window.pack(side="right")
+
+        s1_focus_row = self.tk.Frame(step1_card, bg=BG_CARD)
+        s1_focus_row.pack(fill="x", pady=(6, 0))
+        self.cb_auto_refocus = self.ttk.Checkbutton(
+            s1_focus_row,
+            text="ดึงเกมกลับมาโฟกัสอัตโนมัติ",
+            variable=self.vars["auto_refocus"],
+        )
+        self.cb_auto_refocus.pack(side="left")
+        self.btn_focus_now = self.ttk.Button(
+            s1_focus_row,
+            text="🎯  โฟกัสเกมตอนนี้",
+            style="Secondary.TButton",
+            command=self._focus_target_window,
+        )
+        self.btn_focus_now.pack(side="right")
+
+        self.lbl_focus_hint = self.tk.Label(
+            step1_card,
+            text="* หากเปิดดึงโฟกัสอัตโนมัติ ระบบจะดึงเกมขึ้นมาด้านหน้าเมื่อเสียโฟกัส >0.5s (อาจสลับออกจากโปรแกรมอื่นที่กำลังใช้งาน)",
+            fg=TEXT_HINT,
+            bg=BG_CARD,
+            font=(self.ui_font, 8),
+            wraplength=550,
+            justify="left",
+        )
+        self.lbl_focus_hint.pack(anchor="w", pady=(2, 0))
 
         # Step 2: ตรวจจับ
         step2_card = self.tk.Frame(outer, bg=BG_CARD, padx=12, pady=10,
@@ -1318,9 +1561,40 @@ class BaseFishingApp:
             self.advanced_btn.configure(text="⚙️  ตั้งค่าขั้นสูง  ▾")
         self.advanced_visible = not self.advanced_visible
 
+    def _init_global_hotkey(self):
+        if getattr(self, "_global_hotkey_cleanup", None):
+            return
+        try:
+            self._global_hotkey_cleanup = register_stop(self._on_global_hotkey_signal)
+        except Exception as exc:
+            self._global_hotkey_cleanup = None
+            self._log_debug_event("global_hotkey_init_failed", {"error": str(exc)})
+
+    def _on_global_hotkey_signal(self):
+        try:
+            if hasattr(self, "root") and self.root.winfo_exists():
+                self.root.after(0, self._on_f8_pressed)
+        except Exception:
+            pass
+
+    def _on_f8_pressed(self):
+        if getattr(self, "_closing", False):
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_last_f8_time", 0.0) < 0.35:
+            return
+        self._last_f8_time = now
+        self._toggle_start_stop()
+
     def _toggle_start_stop(self):
+        if getattr(self, "_closing", False):
+            return
         if self.running or getattr(self, "start_pending", False):
-            self.stop()
+            self.stop_requested.set()
+            self.stop("หยุดด้วย F8")
+        elif getattr(self, "test_hold_pending", False) or getattr(self, "test_hold_active", False):
+            self.stop_requested.set()
+            self.stop("หยุดด้วย F8")
         else:
             self.start()
 
@@ -1445,13 +1719,24 @@ class BaseFishingApp:
             pass
 
     def _set_status(self, text):
-        state_names = {"Idle": "พร้อม", "Cast": "เหวี่ยงเบ็ด", "Wait": "รอปลา",
-                       "Track": "คุมแถบ", "End": "รอยืนยันจบรอบ", "Paused": "พักการทำงาน"}
+        state_names = {
+            "Idle": "พร้อม",
+            "Cast": "เหวี่ยงเบ็ด",
+            "Wait": "รอปลา",
+            "Track": "คุมแถบ",
+            "End": "รอยืนยันจบรอบ",
+            "Paused": "พักการทำงาน",
+            "FocusWait": "รอโฟกัสเกม",
+        }
         reason_names = {
             "tracking": "กำลังอ่านภาพเกม",
             "stopped by user": "หยุดโดยผู้ใช้",
-            "focus lost; press Start to resume": "ไม่พบโฟกัสเกม กดเริ่มใหม่เมื่อพร้อม",
+            "focus lost; press Start to resume": "ไม่พบโฟกัสเกม",
+            "waiting for game focus": "รอโฟกัสเกม",
+            "resuming track (stabilizing)": "รอความนิ่งของเป้าหมาย",
+            "tracking resumed": "กลับมา Track แล้ว",
             "screen capture failed": "อ่านภาพหน้าจอไม่สำเร็จ",
+            "screen capture failed (retrying)": "จับภาพไม่ได้ — กำลังลองใหม่",
             "bar detection is ambiguous": "พบแถบหลายตำแหน่ง จึงหยุดเพื่อความปลอดภัย",
             "target window moved or pointer left it": "หน้าต่างเกมย้ายตำแหน่งหรือตัวชี้ออกนอกพื้นที่",
         }
@@ -1490,7 +1775,14 @@ class BaseFishingApp:
                 self.status_text_lbl.configure(text="ข้อผิดพลาด", fg="#f87171")
                 if hasattr(self, "action_guidance_lbl"):
                     self.action_guidance_lbl.configure(text=f"🔴  {display}", fg="#ef4444")
-            elif any(k in display for k in ("กำลังทำงาน", "คุมแถบ", "เหวี่ยงเบ็ด", "รอปลา")):
+            elif any(k in display for k in ("รอโฟกัส", "เมาส์อยู่นอก", "พื้นที่ Track อยู่นอก", "ลองใหม่")):
+                self.status_pill.configure(bg="#451a03")
+                self.status_dot.configure(bg="#451a03")
+                self.status_dot.itemconfig(self.status_dot_id, fill="#f59e0b")
+                self.status_text_lbl.configure(text="รอความพร้อม", fg="#fbbf24")
+                if hasattr(self, "action_guidance_lbl"):
+                    self.action_guidance_lbl.configure(text=f"🟡  {display}", fg="#f59e0b")
+            elif any(k in display for k in ("กำลังทำงาน", "คุมแถบ", "เหวี่ยงเบ็ด", "รอปลา", "กลับมา Track")):
                 self.status_pill.configure(bg="#064e3b")
                 self.status_dot.configure(bg="#064e3b")
                 self.status_dot.itemconfig(self.status_dot_id, fill="#10b981")
@@ -1651,6 +1943,11 @@ class BaseFishingApp:
             self._set_status("บันทึกภาพตัวอย่างสัญญาณปลากินเบ็ดแล้ว")
         else:
             self.settings.setdefault("rois", {})[name] = area
+            if self.target and len(bounds) == 4:
+                wx, wy = bounds[0], bounds[1]
+                if not hasattr(self, "_relative_rois"):
+                    self._relative_rois = {}
+                self._relative_rois[name] = (area[0] - wx, area[1] - wy, area[2], area[3])
             save_settings(self.settings)
             self._set_status("เลือกพื้นที่แล้ว")
             if name == "bar":
@@ -1897,7 +2194,8 @@ class BaseFishingApp:
             return
         try:
             self.stop_requested.clear()
-            self.hotkey_cleanup = register_stop(self.stop_requested.set)
+            if not getattr(self, "_global_hotkey_cleanup", None):
+                self.hotkey_cleanup = register_stop(self.stop_requested.set)
             self.test_hold_pending = True
             self._set_status("สลับไปที่เกมภายใน 3 วินาทีเพื่อทดลองกดค้าง")
             self.test_hold_id = self.root.after(3000, self._begin_test_hold)
@@ -1938,6 +2236,18 @@ class BaseFishingApp:
 
         try:
             if not self.target:
+                snap = window_snapshot()
+                helper_id = int(self.root.winfo_id()) if hasattr(self, "root") and self.root.winfo_exists() else None
+                helper_bounds = None
+                try:
+                    helper_bounds = (int(self.root.winfo_rootx()), int(self.root.winfo_rooty()),
+                                     int(self.root.winfo_width()), int(self.root.winfo_height()))
+                except Exception:
+                    pass
+                same_bounds = helper_bounds and snap and snap[1] == helper_bounds
+                if snap and snap[0] != helper_id and not same_bounds:
+                    self.target = snap
+            if not self.target:
                 raise RuntimeError("กรุณาเลือกหน้าต่างเกมที่โฟกัสอยู่ก่อน")
             settings = self._settings()
             if not settings["rois"].get("bar"):
@@ -1955,6 +2265,87 @@ class BaseFishingApp:
                 self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
             self._set_status(f"เริ่มไม่ได้: {exc}")
 
+    def _focus_target_window(self) -> None:
+        """Focus the selected game window immediately (manual button trigger)."""
+        if not self.target:
+            self._set_status("ยังไม่ได้เลือกหน้าต่างเกม")
+            return
+        wid = self.target[0]
+        if not is_window_alive(wid):
+            self._set_status("หน้าต่างเกมถูกปิดแล้ว")
+            return
+        self._log_debug_event("manual_focus_requested", {"window_id": wid})
+        if focus_window(wid):
+            self._set_status("ส่งคำสั่งโฟกัสหน้าต่างเกมแล้ว")
+        else:
+            self._set_status("ไม่สามารถดึงโฟกัสหน้าต่างเกมได้")
+
+    def _log_debug_event(self, event_type: str, details: dict[str, Any] | None = None) -> None:
+        """Record important transitions and diagnostic events in a fixed 20-item ring buffer."""
+        if not hasattr(self, "recent_events"):
+            self.recent_events = collections.deque(maxlen=20)
+        entry = {
+            "time": time.strftime("%H:%M:%S", time.localtime()),
+            "timestamp": time.monotonic(),
+            "mode": self.settings.get("fishing_mode", "rod") if hasattr(self, "settings") else "rod",
+            "event": event_type,
+            "state": getattr(self.controller, "state", "Unknown") if hasattr(self, "controller") else "Unknown",
+        }
+        if details:
+            entry.update(details)
+        self.recent_events.append(entry)
+        if hasattr(self, "settings") and self.settings.get("debug"):
+            print(f"[DEBUG_EVENT] {entry}")
+
+    def _check_target_status(self) -> tuple[str, tuple[int, int, int, int] | None]:
+        """Verify window identity, bounds, ROI containment, foreground focus, and mouse position."""
+        if not self.target:
+            return "no_target", None
+        target_wid, target_bounds = self.target
+        if not is_window_alive(target_wid):
+            return "closed", None
+
+        cur_bounds = get_window_bounds(target_wid)
+        if not cur_bounds:
+            return "closed", None
+
+        # If window moved or resized, update target bounds and relative ROIs
+        if cur_bounds != target_bounds:
+            old_bounds = target_bounds
+            self.target = (target_wid, cur_bounds)
+            self._log_debug_event("window_moved", {
+                "window_id": target_wid,
+                "old_bounds": old_bounds,
+                "new_bounds": cur_bounds,
+            })
+            if hasattr(self, "_relative_rois") and self._relative_rois:
+                for name, rel_roi in self._relative_rois.items():
+                    rel_x, rel_y, rw, rh = rel_roi
+                    new_roi = [cur_bounds[0] + rel_x, cur_bounds[1] + rel_y, rw, rh]
+                    if _inside_rect(new_roi, cur_bounds):
+                        self.settings.setdefault("rois", {})[name] = new_roi
+
+        # Verify bar ROI is strictly within current window bounds
+        bar_roi = self.settings.get("rois", {}).get("bar")
+        if bar_roi and not _inside_rect(bar_roi, cur_bounds):
+            return "roi_outside", cur_bounds
+
+        # Check desktop foreground window
+        snap = window_snapshot()
+        if snap is None or snap[0] != target_wid:
+            return "not_foreground", cur_bounds
+
+        # Check if cursor is inside game window bounds in Desktop mode
+        try:
+            pyautogui = _load_pyautogui()
+            mouse_pos = tuple(pyautogui.position())
+            if not _inside(mouse_pos, cur_bounds):
+                return "mouse_outside", cur_bounds
+        except Exception:
+            pass
+
+        return "ready", cur_bounds
+
     def _start_now(self, settings):
         if not getattr(self, "start_pending", False):
             return
@@ -1962,12 +2353,18 @@ class BaseFishingApp:
         self.pending_start_id = None
         try:
             target = window_snapshot()
-            if not target or target != self.target:
+            if not target or target[0] != self.target[0]:
                 raise RuntimeError("กรุณาโฟกัสหน้าต่างเกมเดิมที่เลือกไว้")
             settings = validate_settings(settings, target[1])
             self.target = target
             self.stop_requested.clear()
             self.settings = settings
+            # Initialize relative ROIs for dynamic window movement
+            wx, wy, ww, wh = target[1]
+            self._relative_rois = {}
+            for name, roi in self.settings.get("rois", {}).items():
+                if roi and len(roi) == 4:
+                    self._relative_rois[name] = (roi[0] - wx, roi[1] - wy, roi[2], roi[3])
             self.template = None
             template_path = TEMPLATE_FILE
             if settings["rois"].get("bite") and template_path.exists():
@@ -1981,7 +2378,8 @@ class BaseFishingApp:
                         or not _has_spatial_variation(self.template))):
                     self.template = None
             save_settings(settings)
-            self.hotkey_cleanup = register_stop(self.stop_requested.set)
+            if not getattr(self, "_global_hotkey_cleanup", None):
+                self.hotkey_cleanup = register_stop(self.stop_requested.set)
             self.controller = Controller(settings)
             self.controller.start(time.monotonic())
             self.capture = ScreenCapture()
@@ -2010,24 +2408,63 @@ class BaseFishingApp:
         if self.stop_requested.is_set():
             self.stop("หยุดฉุกเฉินด้วย F8")
             return
-        capture_time = time.monotonic()
-        try:
-            if window_snapshot() != self.target:
-                observation = None
-                focused = False
-            else:
+
+        now = time.monotonic()
+        capture_time = now
+
+        target_status, current_bounds = self._check_target_status()
+
+        if target_status == "closed":
+            self._log_debug_event("window_closed", {"target": self.target})
+            self.stop("หน้าต่างเกมถูกปิด")
+            return
+
+        if target_status == "not_foreground":
+            observation = None
+            focused = False
+            # Check auto-refocus if enabled: trigger when lost > 500ms, throttled to 2s
+            if self.settings.get("auto_refocus", False):
+                lost_since = getattr(self.controller, "focus_lost_since", None)
+                if lost_since is not None and (now - lost_since >= 0.5):
+                    if now - getattr(self, "_last_auto_refocus_time", 0.0) >= 2.0:
+                        self._last_auto_refocus_time = now
+                        self._log_debug_event("auto_refocus_attempt", {"window_id": self.target[0]})
+                        focus_window(self.target[0])
+            self._set_status("รอโฟกัสเกม")
+        elif target_status == "mouse_outside":
+            observation = None
+            focused = False
+            self._set_status("เมาส์อยู่นอกเกม — เลื่อนเมาส์กลับเพื่อทำงานต่อ")
+        elif target_status == "roi_outside":
+            observation = None
+            focused = False
+            self._set_status("พื้นที่ Track อยู่นอกหน้าต่าง")
+        elif target_status == "ready":
+            bar_image = None
+            try:
                 bar_image = self.capture.grab(self.settings["rois"]["bar"])
+            except Exception:
+                bar_image = None
+
+            if bar_image is None or bar_image.size == 0:
+                observation = None
+                focused = True
+                self._set_status("จับภาพไม่ได้ — กำลังลองใหม่")
+            else:
                 bar = detect_bar(bar_image)
                 bite = False
                 mode = self.settings.get("fishing_mode", "rod")
                 if mode != "net" and self.template is not None and self.settings["rois"].get("bite"):
-                    bite = detect_bite(self.capture.grab(self.settings["rois"]["bite"]), self.template,
-                                       self.settings["bite_threshold"])
+                    try:
+                        bite_crop = self.capture.grab(self.settings["rois"]["bite"])
+                        bite = detect_bite(bite_crop, self.template, self.settings["bite_threshold"])
+                    except Exception:
+                        bite = False
                 observation = {"bar": bar, "bite": bite}
                 self.fps_count += 1
                 focused = True
 
-                # Real-time preview update (~6-7 FPS throttled for smooth UI without lagging capture)
+                # Real-time preview update (~6-7 FPS throttled)
                 now_t = time.monotonic()
                 if now_t - self._preview_throttle > 0.15:
                     self._preview_throttle = now_t
@@ -2035,16 +2472,23 @@ class BaseFishingApp:
                         self._update_preview_display(bar_image, bar)
                     except Exception:
                         pass
+        else:
+            observation = None
+            focused = False
 
-            if self.stop_requested.is_set():
-                self.stop("หยุดฉุกเฉินด้วย F8")
-                return
-            now = time.monotonic()
-            action = self.controller.step(now, observation, focused, capture_time=capture_time)
-            if not apply_action(action, self.target):
-                self.controller.stop("target window moved or pointer left it")
-            elapsed = now - self.fps_started
-            fps = self.fps_count / elapsed if elapsed > 0 else 0.0
+        if self.stop_requested.is_set():
+            self.stop("หยุดฉุกเฉินด้วย F8")
+            return
+
+        action = self.controller.step(now, observation, focused, capture_time=capture_time)
+        if not apply_action(action, self.target):
+            # Transient input failure (e.g. mouse moved out during frame) - release mouse safely
+            release_mouse()
+
+        elapsed = now - self.fps_started
+        fps = self.fps_count / elapsed if elapsed > 0 else 0.0
+
+        if target_status == "ready" and observation is not None:
             if self.settings.get("debug") and getattr(self.controller, "telemetry", None) and self.controller.state == "Track":
                 t = self.controller.telemetry
                 self._set_status(
@@ -2052,19 +2496,20 @@ class BaseFishingApp:
                     f"• ตัวชี้:{t['marker_x']:.0f} คาดการณ์:{t['predicted_x']:.0f} v:{t['velocity']:+.0f}px/s "
                     f"• หน่วง:{t['total_latency_ms']:.0f}ms (ภาพ:{t['frame_age_ms']:.0f}ms) • สั่ง:{t['action']}"
                 )
-            elif observation and observation.get("bar") and observation["bar"][0] == "absent" and self.controller.state in ("Track", "End"):
-                self._set_status("ตรวจไม่พบเป้าหมาย กำลังค้นหาใหม่")
+            elif observation.get("bar") and observation["bar"][0] == "absent" and self.controller.state in ("Track", "End"):
+                self._set_status("ตรวจไม่พบแถบสีม่วง — กำลังค้นหาใหม่")
+            elif self.controller.state == "Track":
+                if getattr(self.controller, "reason", "") == "tracking resumed":
+                    self._set_status(f"กลับมา Track แล้ว | {fps:.1f} FPS")
+                else:
+                    self._set_status(f"กำลัง Track | {fps:.1f} FPS")
             else:
                 self._set_status(f"{self.controller.state}: {self.controller.reason or 'tracking'} | {fps:.1f} FPS")
-            if self.controller.state == "Paused":
-                self.stop()
-                return
-        except Exception as exc:
-            self.controller.stop(f"error: {exc}")
-            release_mouse()
-            self._set_status(f"พักการทำงาน: {exc}")
+
+        if self.controller.state == "Paused":
             self.stop()
             return
+
         self.root.after(12, self._pump)
 
     def stop(self, reason: str | None = None):
@@ -2114,6 +2559,12 @@ class BaseFishingApp:
     def close(self):
         self._closing = True
         self.stop()
+        if getattr(self, "_global_hotkey_cleanup", None):
+            try:
+                self._global_hotkey_cleanup()
+            except Exception:
+                pass
+            self._global_hotkey_cleanup = None
         self.root.destroy()
 
 

@@ -993,7 +993,8 @@ class LinuxFishingApp(BaseFishingApp):
 
             self.running = True
             self.stop_requested.clear()
-            self.hotkey_cleanup = register_stop(self.stop_requested.set)
+            if not getattr(self, "_global_hotkey_cleanup", None):
+                self.hotkey_cleanup = register_stop(self.stop_requested.set)
             self._set_mode_widgets_state("disabled")
             if hasattr(self, "main_action_btn"):
                 self.main_action_btn.configure(text="■  หยุด Auto (F8)", style="Danger.TButton")

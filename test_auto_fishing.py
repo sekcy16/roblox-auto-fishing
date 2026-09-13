@@ -112,7 +112,7 @@ class ControlCheck(unittest.TestCase):
         c.start(0.0)
         self.assertEqual(c.step(0.0, {"bar": ("absent", None, None), "bite": False}, True), "hold")
         self.assertEqual(c.step(0.1, {"bar": ("absent", None, None), "bite": False}, False), "release")
-        self.assertEqual(c.state, "Paused")
+        self.assertEqual(c.state, "FocusWait")
         self.assertIn("focus", c.reason.lower())
 
     def test_end_recasts_after_one_second_absence(self):
@@ -431,7 +431,7 @@ class FishingModeTests(unittest.TestCase):
         action1 = c1.step(0.2, {"bar": ("absent", None, None), "bite": False}, False)
         self.assertEqual(action1, "release")
         self.assertFalse(c1.held)
-        self.assertEqual(c1.state, "Paused")
+        self.assertEqual(c1.state, "FocusWait")
 
         # Case B: Focus loss while holding in Track
         c2 = Controller({"cast_seconds": 0.1, "lead": 0.0, "margin": 3.0, "right_on_hold": False})
@@ -447,7 +447,7 @@ class FishingModeTests(unittest.TestCase):
         action_loss = c2.step(0.3, {"bar": valid_hold, "bite": False}, False)
         self.assertEqual(action_loss, "release")
         self.assertFalse(c2.held)
-        self.assertEqual(c2.state, "Paused")
+        self.assertEqual(c2.state, "FocusWait")
 
         # Case C: Explicit stop while holding
         c3 = Controller({"cast_seconds": 1.0, "lead": 0.05, "margin": 3.0, "right_on_hold": False})
