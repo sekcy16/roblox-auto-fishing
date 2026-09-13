@@ -30,7 +30,13 @@ try:
 except ImportError:  # pragma: no cover - pure logic remains usable
     cv2 = None
 
-import gamescope_manager as gm
+if platform.system() == "Linux":
+    try:
+        import gamescope_manager as gm
+    except Exception:  # pragma: no cover
+        gm = None
+else:
+    gm = None
 
 
 ROOT = Path(__file__).resolve().parent
@@ -59,7 +65,7 @@ MODE_CONFIGS = {
     },
 }
 DEFAULT_SETTINGS = {
-    "env_mode": "desktop",
+    # Shared core settings
     "fishing_mode": "rod",
     "cast_seconds": 2.0,
     "right_on_hold": False,
@@ -68,6 +74,20 @@ DEFAULT_SETTINGS = {
     "bite_threshold": 0.85,
     "bite_ack": True,
     "debug": False,
+    # Platform-specific isolated namespaces
+    "windows": {
+        "rois": {"bar": None, "bite": None},
+    },
+    "linux": {
+        "env_mode": "desktop",
+        "desktop_rois": {"bar": None, "bite": None},
+        "gamescope_rois": {"bar": None, "bite": None},
+        "gamescope_fps": 60,
+        "gamescope_res": "1280x720",
+        "gamescope_fullscreen": False,
+    },
+    # Backwards compatibility mirrors
+    "env_mode": "desktop",
     "gamescope_fps": 60,
     "gamescope_res": "1280x720",
     "gamescope_fullscreen": False,
@@ -93,10 +113,14 @@ def validate_settings(data: dict[str, Any], screen_bounds: tuple[int, int, int, 
     if sw <= 0 or sh <= 0:
         raise ValueError("ขอบเขตหน้าจอต้องมีขนาดมากกว่าศูนย์")
     result = dict(DEFAULT_SETTINGS)
-    result.update({k: v for k, v in data.items() if k not in ("rois", "gamescope_rois")})
+    result.update({k: v for k, v in data.items() if k not in ("rois", "gamescope_rois", "linux", "windows")})
     result["env_mode"] = str(data.get("env_mode", "desktop"))
     if "gamescope_rois" in data and isinstance(data["gamescope_rois"], dict):
         result["gamescope_rois"] = dict(data["gamescope_rois"])
+    if "linux" in data and isinstance(data["linux"], dict):
+        result["linux"] = dict(data["linux"])
+    if "windows" in data and isinstance(data["windows"], dict):
+        result["windows"] = dict(data["windows"])
     mode = result.get("fishing_mode", "rod")
     if not isinstance(mode, str) or mode not in MODE_CONFIGS:
         raise ValueError("ประเภทอุปกรณ์ตกปลาต้องเป็น 'rod' หรือ 'net'")
@@ -783,10 +807,33 @@ def _register_x11_stop(callback):
 def save_settings(settings: dict[str, Any], path: Path = SETTINGS_FILE) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    to_save = dict(settings)
+    # Sync platform namespaces before writing to disk
+    if platform.system() == "Windows":
+        if "windows" not in to_save or not isinstance(to_save["windows"], dict):
+            to_save["windows"] = {}
+        if "rois" in to_save:
+            to_save["windows"]["rois"] = dict(to_save["rois"])
+    else:
+        if "linux" not in to_save or not isinstance(to_save["linux"], dict):
+            to_save["linux"] = {}
+        to_save["linux"]["env_mode"] = to_save.get("env_mode", "desktop")
+        to_save["linux"]["gamescope_fps"] = to_save.get("gamescope_fps", 60)
+        to_save["linux"]["gamescope_res"] = to_save.get("gamescope_res", "1280x720")
+        to_save["linux"]["gamescope_fullscreen"] = to_save.get("gamescope_fullscreen", False)
+        if to_save.get("gamescope_rois"):
+            to_save["linux"]["gamescope_rois"] = dict(to_save["gamescope_rois"])
+        if to_save.get("env_mode") == "gamescope":
+            if "rois" in to_save:
+                to_save["linux"]["gamescope_rois"] = dict(to_save["rois"])
+        else:
+            if "rois" in to_save:
+                to_save["linux"]["desktop_rois"] = dict(to_save["rois"])
+
     fd, temp_name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent, text=True)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(settings, handle, indent=2)
+            json.dump(to_save, handle, indent=2)
             handle.write("\n")
         os.replace(temp_name, path)
     except Exception:
@@ -800,9 +847,48 @@ def save_settings(settings: dict[str, Any], path: Path = SETTINGS_FILE) -> None:
 def load_settings(path: Path = SETTINGS_FILE) -> dict[str, Any]:
     try:
         with Path(path).open(encoding="utf-8") as handle:
-            return json.load(handle)
+            data = json.load(handle)
     except (FileNotFoundError, json.JSONDecodeError):
-        return dict(DEFAULT_SETTINGS)
+        data = {}
+
+    result = dict(DEFAULT_SETTINGS)
+    if isinstance(data, dict):
+        result.update({k: v for k, v in data.items() if k not in ("linux", "windows")})
+        # Windows namespace migration
+        win_data = data.get("windows") if isinstance(data.get("windows"), dict) else {}
+        win_rois = win_data.get("rois") or data.get("windows_rois") or data.get("rois") or {"bar": None, "bite": None}
+        result["windows"] = {
+            "rois": dict(win_rois) if isinstance(win_rois, dict) else {"bar": None, "bite": None}
+        }
+        # Linux namespace migration
+        lin_data = data.get("linux") if isinstance(data.get("linux"), dict) else {}
+        lin_env = lin_data.get("env_mode") or data.get("env_mode", "desktop")
+        lin_desktop_rois = lin_data.get("desktop_rois") or data.get("rois") or {"bar": None, "bite": None}
+        lin_gs_rois = lin_data.get("gamescope_rois") or data.get("gamescope_rois") or {"bar": None, "bite": None}
+        result["linux"] = {
+            "env_mode": str(lin_env),
+            "desktop_rois": dict(lin_desktop_rois) if isinstance(lin_desktop_rois, dict) else {"bar": None, "bite": None},
+            "gamescope_rois": dict(lin_gs_rois) if isinstance(lin_gs_rois, dict) else {"bar": None, "bite": None},
+            "gamescope_fps": int(lin_data.get("gamescope_fps", data.get("gamescope_fps", 60))),
+            "gamescope_res": str(lin_data.get("gamescope_res", data.get("gamescope_res", "1280x720"))),
+            "gamescope_fullscreen": bool(lin_data.get("gamescope_fullscreen", data.get("gamescope_fullscreen", False))),
+        }
+
+    # Mirror active platform settings to top-level keys
+    if platform.system() == "Windows":
+        result["rois"] = dict(result["windows"]["rois"])
+    else:
+        result["env_mode"] = result["linux"]["env_mode"]
+        result["gamescope_fps"] = result["linux"]["gamescope_fps"]
+        result["gamescope_res"] = result["linux"]["gamescope_res"]
+        result["gamescope_fullscreen"] = result["linux"]["gamescope_fullscreen"]
+        result["gamescope_rois"] = dict(result["linux"]["gamescope_rois"])
+        if result["linux"]["env_mode"] == "gamescope":
+            result["rois"] = dict(result["linux"]["gamescope_rois"])
+        else:
+            result["rois"] = dict(result["linux"]["desktop_rois"])
+
+    return result
 
 
 class ScreenCapture:
@@ -822,7 +908,7 @@ class ScreenCapture:
         self._capture.close()
 
 
-class FishingApp:
+class BaseFishingApp:
     """Modern dark charcoal Tkinter controller with live preview and frozen-screen ROI selection."""
 
     def __init__(self, root):
@@ -853,37 +939,22 @@ class FishingApp:
         if mode not in MODE_CONFIGS:
             mode = "rod"
         self.current_mode = mode
-        env = self.settings.get("env_mode", "desktop")
-        if env not in ("desktop", "gamescope"):
-            env = "desktop"
-        self.env_mode = env
-        self.gamescope_worker_proc = None
-        self.gamescope_pipe = None
-        self.gamescope_last_ping = 0.0
-        self.gamescope_session = None
-        self.spawned_gamescope_proc = None
-        self.gamescope_display = None
-        self.gamescope_launch_pending = False
-        self.gamescope_status_job = None
-        self.gamescope_launch_error = None
-        self._closing = False
-        self.vars = {
-            "env_mode": tk.StringVar(value=env),
-            "fishing_mode": tk.StringVar(value=mode),
-            "cast_seconds": tk.StringVar(value=str(self.settings.get("cast_seconds", DEFAULT_SETTINGS["cast_seconds"]))),
-            "margin": tk.StringVar(value=str(self.settings.get("margin", DEFAULT_SETTINGS["margin"]))),
-            "lead": tk.StringVar(value=str(self.settings.get("lead", DEFAULT_SETTINGS["lead"]))),
-            "threshold": tk.StringVar(value=str(self.settings.get("bite_threshold", DEFAULT_SETTINGS["bite_threshold"]))),
-            "right": tk.BooleanVar(value=bool(self.settings.get("right_on_hold", DEFAULT_SETTINGS["right_on_hold"]))),
-            "ack": tk.BooleanVar(value=bool(self.settings.get("bite_ack", DEFAULT_SETTINGS["bite_ack"]))),
-            "debug": tk.BooleanVar(value=bool(self.settings.get("debug", DEFAULT_SETTINGS.get("debug", False)))),
-            "gamescope_fps": tk.StringVar(value=str(self.settings.get("gamescope_fps", DEFAULT_SETTINGS["gamescope_fps"]))),
-            "gamescope_res": tk.StringVar(value=str(self.settings.get("gamescope_res", DEFAULT_SETTINGS.get("gamescope_res", "1280x720")))),
-            "gamescope_fullscreen": tk.BooleanVar(value=bool(self.settings.get("gamescope_fullscreen", DEFAULT_SETTINGS.get("gamescope_fullscreen", False)))),
-        }
+        self._init_vars()
         self.status = tk.StringVar(value="พร้อม — เลือกพื้นที่บนหน้าจอเพื่อเริ่ม")
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+    def _init_vars(self):
+        self.vars = {
+            "fishing_mode": self.tk.StringVar(value=self.current_mode),
+            "cast_seconds": self.tk.StringVar(value=str(self.settings.get("cast_seconds", DEFAULT_SETTINGS["cast_seconds"]))),
+            "margin": self.tk.StringVar(value=str(self.settings.get("margin", DEFAULT_SETTINGS["margin"]))),
+            "lead": self.tk.StringVar(value=str(self.settings.get("lead", DEFAULT_SETTINGS["lead"]))),
+            "threshold": self.tk.StringVar(value=str(self.settings.get("bite_threshold", DEFAULT_SETTINGS["bite_threshold"]))),
+            "right": self.tk.BooleanVar(value=bool(self.settings.get("right_on_hold", DEFAULT_SETTINGS["right_on_hold"]))),
+            "ack": self.tk.BooleanVar(value=bool(self.settings.get("bite_ack", DEFAULT_SETTINGS["bite_ack"]))),
+            "debug": self.tk.BooleanVar(value=bool(self.settings.get("debug", DEFAULT_SETTINGS.get("debug", False)))),
+        }
 
     def _on_mode_change(self):
         if self.running or getattr(self, "start_pending", False):
@@ -893,264 +964,6 @@ class FishingApp:
         if new_mode in MODE_CONFIGS:
             self.current_mode = new_mode
 
-    def _on_env_mode_change(self):
-        if self.running or getattr(self, "start_pending", False):
-            self.vars["env_mode"].set(self.env_mode)
-            return
-        new_env = self.vars["env_mode"].get()
-        if new_env in ("desktop", "gamescope"):
-            self.env_mode = new_env
-            self.settings["env_mode"] = new_env
-            save_settings(self.settings)
-            self._refresh_ope_status()
-            self._update_readiness()
-            self._restore_mode_preview()
-
-    def _refresh_gamescope_status(self):
-        if not hasattr(self, "gamescope_status_badge"):
-            return
-        if self.gamescope_display:
-            session = gm.inspect_display(self.gamescope_display)
-        else:
-            session = gm.find_active_gamescope_session()
-        self.gamescope_session = session
-        if session and session.get("target_window_id"):
-            disp = session.get("display", ":1")
-            win_name = session.get("target_window_name") or "Sober / Roblox"
-            self.gamescope_status_badge.configure(
-                text=f"🟢 {disp} : {win_name[:24]}",
-                fg="#34d399", bg="#064e3b"
-            )
-        elif session:
-            disp = session.get("display", ":1")
-            self.gamescope_status_badge.configure(
-                text=f"🟡 {disp} : รอเข้าเกม",
-                fg="#fbbf24", bg="#451a03"
-            )
-        else:
-            self.gamescope_status_badge.configure(
-                text="⚪ ไม่พบ Gamescope",
-                fg="#9d96b0", bg="#272336"
-            )
-        self._update_readiness()
-
-    def _poll_gamescope_status(self):
-        self.gamescope_status_job = None
-        if getattr(self, "_closing", False):
-            return
-        owned = self.spawned_gamescope_proc
-        if owned is not None and owned.poll() is not None:
-            code = owned.poll()
-            detail = " ".join(gm.read_process_output(owned).split())
-            gm.stop_process_safely(owned)
-            self.spawned_gamescope_proc = None
-            self.gamescope_display = None
-            self.gamescope_session = None
-            self.gamescope_launch_error = f"Gamescope หยุดทำงาน (รหัส {code})" + (f": {detail[-4000:]}" if detail else "")
-            self.gamescope_status_badge.configure(text="🔴 Gamescope หยุดทำงาน", fg="#fca5a5", bg="#450a0a")
-            self._set_status(f"เริ่ม Gamescope ไม่ได้: {self.gamescope_launch_error}")
-            self._update_readiness()
-        elif self.gamescope_launch_error:
-            self._update_readiness()
-        else:
-            self._refresh_gamescope_status()
-        if hasattr(self, "root"):
-            try:
-                self.gamescope_status_job = self.root.after(1000, self._poll_gamescope_status)
-            except Exception:
-                pass
-
-    def _set_gamescope_launch_button(self, state: str = "normal"):
-        if not hasattr(self, "btn_launch_gs"):
-            return
-        text = "⏳ กำลังเปิด Gamescope..." if state == "disabled" else "▶ เปิด Sober ใน Gamescope"
-        self.btn_launch_gs.configure(state=state, text=text)
-
-    def _launch_gamescope(self):
-        if getattr(self, "running", False):
-            self._set_status("หยุดการทำงานก่อนเปิด Gamescope เพิ่ม")
-            return
-        if self.gamescope_launch_pending:
-            self._set_status("กำลังเปิด Gamescope อยู่ กรุณารอสักครู่")
-            return
-        owned = self.spawned_gamescope_proc
-        if owned is not None and owned.poll() is None:
-            self._set_status("Gamescope ที่เปิดจากโปรแกรมกำลังทำงานอยู่")
-            self._refresh_gamescope_status()
-            return
-
-        self.gamescope_launch_pending = True
-        self.gamescope_launch_error = None
-        if hasattr(self, "vars"):
-            if "gamescope_fps" in self.vars:
-                try:
-                    fps_val = int(self.vars["gamescope_fps"].get())
-                    self.settings["gamescope_fps"] = fps_val
-                    sober_cfg = Path.home() / ".var/app/org.vinegarhq.Sober/config/sober/config.json"
-                    if sober_cfg.exists():
-                        try:
-                            with open(sober_cfg, "r", encoding="utf-8") as f:
-                                text = f.read()
-                            import re
-                            text = re.sub(r'"DFIntTaskSchedulerTargetFps":\s*\d+', f'"DFIntTaskSchedulerTargetFps": {fps_val}', text)
-                            with open(sober_cfg, "w", encoding="utf-8") as f:
-                                f.write(text)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-            if "gamescope_res" in self.vars:
-                self.settings["gamescope_res"] = str(self.vars["gamescope_res"].get())
-            if "gamescope_fullscreen" in self.vars:
-                self.settings["gamescope_fullscreen"] = bool(self.vars["gamescope_fullscreen"].get())
-            save_settings(self.settings)
-        self._set_gamescope_launch_button("disabled")
-        if hasattr(self, "gamescope_status_badge"):
-            self.gamescope_status_badge.configure(text="🟡 กำลังเปิด Gamescope...", fg="#fbbf24", bg="#451a03")
-        self._set_status("กำลังเปิด Sober ใน Gamescope — กรุณารอการตรวจพบจอแยก")
-        threading.Thread(target=self._launch_gamescope_worker, name="gamescope-launch", daemon=True).start()
-
-    def _launch_gamescope_worker(self):
-        proc = None
-        try:
-            fps_val = 60
-            if hasattr(self, "vars") and "gamescope_fps" in self.vars:
-                try:
-                    fps_val = int(self.vars["gamescope_fps"].get())
-                except (ValueError, TypeError):
-                    fps_val = 60
-            elif isinstance(self.settings, dict):
-                try:
-                    fps_val = int(self.settings.get("gamescope_fps", 60))
-                except (ValueError, TypeError):
-                    fps_val = 60
-
-            res_str = "1280x720"
-            if hasattr(self, "vars") and "gamescope_res" in self.vars:
-                res_str = str(self.vars["gamescope_res"].get())
-            elif isinstance(self.settings, dict):
-                res_str = str(self.settings.get("gamescope_res", "1280x720"))
-
-            w_val, h_val = 1280, 720
-            if "x" in res_str:
-                try:
-                    w_s, h_s = res_str.split("x", 1)
-                    w_val, h_val = int(w_s), int(h_s)
-                except Exception:
-                    w_val, h_val = 1280, 720
-
-            fs_val = False
-            if hasattr(self, "vars") and "gamescope_fullscreen" in self.vars:
-                fs_val = bool(self.vars["gamescope_fullscreen"].get())
-            elif isinstance(self.settings, dict):
-                fs_val = bool(self.settings.get("gamescope_fullscreen", False))
-
-            proc, discovered = gm.launch_sober_in_gamescope(
-                width=w_val,
-                height=h_val,
-                fullscreen=fs_val,
-                refresh_rate=fps_val,
-            )
-            error = None if discovered else "ไม่พบจอ Gamescope ภายใน 10 วินาที — ตรวจว่า Gamescope และไดรเวอร์ X11 พร้อมใช้งาน"
-        except Exception as exc:
-            discovered = None
-            error = str(exc)
-        if getattr(self, "_closing", False):
-            if proc is not None:
-                gm.stop_process_safely(proc)
-            return
-        try:
-            self.root.after(0, self._finish_gamescope_launch, proc, discovered, error)
-        except Exception:
-            if proc is not None:
-                gm.stop_process_safely(proc)
-
-    def _finish_gamescope_launch(self, proc, discovered, error):
-        if getattr(self, "_closing", False):
-            if proc is not None:
-                gm.stop_process_safely(proc)
-            return
-        self.gamescope_launch_pending = False
-        self._set_gamescope_launch_button("normal")
-        if error:
-            if proc is not None:
-                gm.stop_process_safely(proc)
-            self.spawned_gamescope_proc = None
-            self.gamescope_display = None
-            self.gamescope_session = None
-            self.gamescope_launch_error = error
-            if hasattr(self, "gamescope_status_badge"):
-                self.gamescope_status_badge.configure(text="🔴 เปิด Gamescope ไม่สำเร็จ", fg="#fca5a5", bg="#450a0a")
-            self._set_status(f"เริ่ม Gamescope ไม่ได้: {error}")
-            self._update_readiness()
-            return
-        self.spawned_gamescope_proc = proc
-        self.gamescope_display = discovered
-        self.gamescope_launch_error = None
-        self._set_status(f"เปิด Sober แล้ว ({discovered}) — กำลังตรวจหน้าต่างเกม")
-        self._refresh_gamescope_status()
-
-    def _grab_gamescope_rect(self, x: int, y: int, w: int, h: int) -> np.ndarray | None:
-        session = self.gamescope_session or gm.find_active_gamescope_session()
-        if not session or not session.get("target_window_id"):
-            return None
-        disp_str = session["display"]
-        win_id = session["target_window_id"]
-        from Xlib import display, X
-        try:
-            d = display.Display(disp_str)
-            win = d.create_resource_object("window", win_id)
-            raw = win.get_image(x, y, w, h, X.ZPixmap, 0xFFFFFFFF)
-            d.close()
-            if not raw or not raw.data:
-                return None
-            arr = np.frombuffer(raw.data, dtype=np.uint8).reshape((h, w, 4))
-            return arr[:, :, :3].copy()
-        except Exception:
-            return None
-
-    def _capture_gamescope_window(self) -> np.ndarray:
-        session = gm.find_active_gamescope_session()
-        if not session or not session.get("target_window_id"):
-            raise RuntimeError("ไม่พบหน้าต่างเกมใน Gamescope กรุณาเปิดเกมด้วย run_gamescope.sh ก่อน")
-        disp_str = session["display"]
-        win_id = session["target_window_id"]
-        from Xlib import display, X
-        d = display.Display(disp_str)
-        win = d.create_resource_object("window", win_id)
-        geom = win.get_geometry()
-        raw = win.get_image(0, 0, geom.width, geom.height, X.ZPixmap, 0xFFFFFFFF)
-        d.close()
-        if not raw or not raw.data:
-            raise RuntimeError("จับภาพหน้าต่างเกมใน Gamescope ไม่สำเร็จ")
-        arr = np.frombuffer(raw.data, dtype=np.uint8).reshape((geom.height, geom.width, 4))
-        return arr[:, :, :3].copy()
-
-    def _restore_mode_preview(self):
-        if self.env_mode == "gamescope":
-            bar_roi = self.settings.get("gamescope_rois", {}).get("bar")
-            if bar_roi:
-                try:
-                    crop = self._grab_gamescope_rect(*bar_roi)
-                    if crop is not None:
-                        self._update_preview_display(crop)
-                        return
-                except Exception:
-                    pass
-            self._draw_preview_placeholder()
-        else:
-            bar_roi = self.settings.get("rois", {}).get("bar")
-            if bar_roi:
-                try:
-                    cap = ScreenCapture()
-                    crop = cap.grab(bar_roi)
-                    cap.close()
-                    self._update_preview_display(crop)
-                    return
-                except Exception:
-                    pass
-            self._draw_preview_placeholder()
-
     def _set_mode_widgets_state(self, state: str):
         if hasattr(self, "mode_rod_rb") and hasattr(self, "mode_net_rb"):
             try:
@@ -1158,22 +971,35 @@ class FishingApp:
                 self.mode_net_rb.configure(state=state)
             except Exception:
                 pass
-        if hasattr(self, "mode_desktop_rb") and hasattr(self, "mode_gamescope_rb"):
+
+    def _restore_mode_preview(self):
+        bar_roi = self.settings.get("rois", {}).get("bar")
+        if bar_roi:
             try:
-                self.mode_desktop_rb.configure(state=state)
-                self.mode_gamescope_rb.configure(state=state)
+                cap = ScreenCapture()
+                crop = cap.grab(bar_roi)
+                cap.close()
+                self._update_preview_display(crop)
+                return
             except Exception:
                 pass
-        if hasattr(self, "btn_launch_gs"):
-            self.btn_launch_gs.configure(
-                state="disabled" if state == "disabled" or self.gamescope_launch_pending else "normal"
-            )
-        for w in ("gs_fps_cb", "gs_res_cb", "gs_fs_cb"):
-            if hasattr(self, w):
-                try:
-                    getattr(self, w).configure(state=state)
-                except Exception:
-                    pass
+        self._draw_preview_placeholder()
+
+    def _build_mode_panel(self, outer):
+        """Platform-specific hook to insert mode selection or requirement card."""
+        pass
+
+    def _build_advanced_tuning(self, tuning):
+        """Platform-specific hook to add tuning controls."""
+        pass
+
+    def _build_advanced_extra(self, advanced_frame):
+        """Platform-specific hook to add extra settings/notices."""
+        pass
+
+    def _on_built(self):
+        """Platform-specific hook executed at the end of _build()."""
+        pass
 
     def _build(self):
         self.root.title(f"Roblox Auto Fishing — Auto Tracking {APP_VERSION}")
@@ -1323,62 +1149,7 @@ class FishingApp:
         self.preview_detection_label.pack(side="right")
 
         # 3. Control Panel
-        # Environment Mode Card (Single Desktop vs Gamescope Dual-Monitor)
-        mode_card = self.tk.Frame(outer, bg=BG_CARD, padx=12, pady=10,
-                                  highlightthickness=1, highlightbackground=BORDER_COLOR)
-        mode_card.pack(fill="x", pady=(0, 8))
-
-        m_hdr = self.tk.Frame(mode_card, bg=BG_CARD)
-        m_hdr.pack(fill="x", pady=(0, 6))
-        self.tk.Label(m_hdr, text="โหมดหน้าจอ / การควบคุม", fg=TEXT_MAIN, bg=BG_CARD,
-                      font=(self.ui_font, 11, "bold")).pack(side="left")
-        self.gamescope_status_badge = self.tk.Label(m_hdr, text="ตรวจสถานะ Gamescope...",
-                                                    fg=TEXT_MUTED, bg=BG_CARD_LIGHT,
-                                                    padx=8, pady=2, font=(self.ui_font, 8, "bold"))
-        self.gamescope_status_badge.pack(side="right")
-
-        m_row = self.tk.Frame(mode_card, bg=BG_CARD)
-        m_row.pack(fill="x")
-        self.mode_desktop_rb = self.ttk.Radiobutton(
-            m_row, text="🖥️  จอเดี่ยว (Desktop ปกติ)",
-            variable=self.vars["env_mode"], value="desktop",
-            command=self._on_env_mode_change
-        )
-        self.mode_desktop_rb.pack(side="left", padx=(0, 16))
-
-        self.mode_gamescope_rb = self.ttk.Radiobutton(
-            m_row, text="🎮  จอแยก 2 จอ (Gamescope + Sober)",
-            variable=self.vars["env_mode"], value="gamescope",
-            command=self._on_env_mode_change
-        )
-        self.mode_gamescope_rb.pack(side="left")
-
-        gs_actions = self.tk.Frame(mode_card, bg=BG_CARD)
-        gs_actions.pack(fill="x", pady=(6, 0))
-
-        fps_frame = self.tk.Frame(gs_actions, bg=BG_CARD)
-        fps_frame.pack(side="left")
-        self.tk.Label(fps_frame, text="⚡ ขนาด:", fg=TEXT_MAIN, bg=BG_CARD,
-                      font=(self.ui_font, 9)).pack(side="left", padx=(0, 2))
-        self.gs_res_cb = self.ttk.Combobox(fps_frame, textvariable=self.vars["gamescope_res"],
-                                           values=("1280x720", "1600x900", "1920x1080", "960x540"), width=8)
-        self.gs_res_cb.pack(side="left", padx=(0, 6))
-
-        self.tk.Label(fps_frame, text="FPS:", fg=TEXT_MAIN, bg=BG_CARD,
-                      font=(self.ui_font, 9)).pack(side="left", padx=(0, 2))
-        self.gs_fps_cb = self.ttk.Combobox(fps_frame, textvariable=self.vars["gamescope_fps"],
-                                           values=("60", "90", "120", "144", "165", "240"), width=4)
-        self.gs_fps_cb.pack(side="left", padx=(0, 6))
-
-        self.gs_fs_cb = self.ttk.Checkbutton(fps_frame, text="เต็มจอ", variable=self.vars["gamescope_fullscreen"])
-        self.gs_fs_cb.pack(side="left")
-
-        self.btn_refresh_gs = self.ttk.Button(gs_actions, text="🔄 ตรวจ",
-                                              style="Secondary.TButton", command=self._refresh_gamescope_status)
-        self.btn_refresh_gs.pack(side="right")
-        self.btn_launch_gs = self.ttk.Button(gs_actions, text="▶ เปิด Sober",
-                                             style="Secondary.TButton", command=self._launch_gamescope)
-        self.btn_launch_gs.pack(side="right", padx=(0, 4))
+        self._build_mode_panel(outer)
 
         # Step 1: เลือกพื้นที่
         step1_card = self.tk.Frame(outer, bg=BG_CARD, padx=12, pady=10,
@@ -1521,10 +1292,7 @@ class FishingApp:
                       font=(self.ui_font, 10)).grid(row=4, column=0, sticky="w", pady=3)
         self.ttk.Entry(tuning, textvariable=self.vars["threshold"], width=8).grid(row=4, column=1, sticky="w", padx=8, pady=3)
 
-        self.tk.Label(tuning, text="Gamescope FPS (Hz)", fg=TEXT_MAIN, bg=BG_CARD,
-                      font=(self.ui_font, 10)).grid(row=5, column=0, sticky="w", pady=3)
-        self.ttk.Combobox(tuning, textvariable=self.vars["gamescope_fps"],
-                          values=("60", "90", "120", "144", "165", "240"), width=7).grid(row=5, column=1, sticky="w", padx=8, pady=3)
+        self._build_advanced_tuning(tuning)
 
         cb_frame = self.tk.Frame(self.advanced_frame, bg=BG_CARD)
         cb_frame.pack(fill="x", pady=(4, 4))
@@ -1535,10 +1303,11 @@ class FishingApp:
         extra_row.pack(fill="x", pady=(6, 2))
         self.ttk.Button(extra_row, text="ทดลองกดค้าง 0.1 วินาที", style="Secondary.TButton", command=self.test_hold).pack(side="left")
         self.ttk.Button(extra_row, text="เลือกพื้นที่เพิ่มเติม...", style="Secondary.TButton", command=self.select_rois).pack(side="right")
+        self._build_advanced_extra(self.advanced_frame)
 
         self._draw_preview_placeholder()
         self._update_readiness()
-        self.gamescope_status_job = self.root.after(0, self._poll_gamescope_status)
+        self._on_built()
 
     def toggle_advanced(self):
         if self.advanced_visible:
@@ -1753,76 +1522,35 @@ class FishingApp:
         if not hasattr(self, "target_summary"):
             return
 
-        if self.env_mode == "gamescope":
-            if hasattr(self, "btn_select_window"):
-                self.btn_select_window.pack_forget()
-            session = self.gamescope_session or gm.find_active_gamescope_session()
-            if session and session.get("target_window_id"):
-                disp = session.get("display", ":1")
-                win_name = session.get("target_window_name") or "Sober / Roblox"
-                self.target_summary.configure(text=f"Gamescope ({disp}): {win_name[:20]}")
-            else:
-                self.target_summary.configure(text="ยังไม่พบ Gamescope")
-
-            rois = self.settings.get("gamescope_rois", {}) if isinstance(self.settings, dict) else {}
-            bar_ready = bool(rois.get("bar"))
-            if bar_ready:
-                bar_roi = rois["bar"]
-                self.roi_summary.configure(text=f"แถบ Gamescope: {bar_roi[2]} × {bar_roi[3]} px")
-                if hasattr(self, "roi_size_label"):
-                    self.roi_size_label.configure(text=f"ขนาดพื้นที่: {bar_roi[2]} × {bar_roi[3]} px")
-                if hasattr(self, "btn_select_roi"):
-                    self.btn_select_roi.configure(text="🎯  เลือกพื้นที่จากภาพเกม")
-                if hasattr(self, "main_action_btn") and not self.running and not getattr(self, "start_pending", False):
-                    self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
-            else:
-                self.roi_summary.configure(text="ยังไม่กำหนดแถบ Gamescope")
-                if hasattr(self, "roi_size_label"):
-                    self.roi_size_label.configure(text="ขนาดพื้นที่: ยังไม่ได้กำหนด")
-                if hasattr(self, "btn_select_roi"):
-                    self.btn_select_roi.configure(text="🎯  เลือกพื้นที่จากภาพเกม")
-                if hasattr(self, "main_action_btn") and not self.running and not getattr(self, "start_pending", False):
-                    self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
-                    if hasattr(self, "action_guidance_lbl") and self.status_text_lbl.cget("text") != "ข้อผิดพลาด":
-                        self.action_guidance_lbl.configure(text="⚠️  กรุณาเลือกพื้นที่จากภาพเกมในขั้นตอนที่ 1 ก่อนเริ่ม", fg="#f59e0b")
+        if hasattr(self, "btn_select_window"):
+            self.btn_select_window.pack(side="right")
+        if hasattr(self, "btn_select_roi"):
+            self.btn_select_roi.configure(text="🎯  เลือกพื้นที่บนหน้าจอ")
+        if self.target:
+            bounds = self.target[1]
+            self.target_summary.configure(text=f"เกม: {bounds[2]} × {bounds[3]} px")
         else:
-            if hasattr(self, "btn_select_window"):
-                self.btn_select_window.pack(side="right")
-            if hasattr(self, "btn_select_roi"):
-                self.btn_select_roi.configure(text="🎯  เลือกพื้นที่บนหน้าจอ")
-            if self.target:
-                bounds = self.target[1]
-                self.target_summary.configure(text=f"เกม: {bounds[2]} × {bounds[3]} px")
-            else:
-                self.target_summary.configure(text="ยังไม่เลือกเกม")
+            self.target_summary.configure(text="ยังไม่เลือกเกม")
 
-            rois = self.settings.get("rois", {}) if isinstance(self.settings, dict) else {}
-            bar_ready = bool(rois.get("bar"))
-            if bar_ready:
-                bar_roi = rois["bar"]
-                self.roi_summary.configure(text=f"แถบมินิเกม: {bar_roi[2]} × {bar_roi[3]} px")
-                if hasattr(self, "roi_size_label"):
-                    self.roi_size_label.configure(text=f"ขนาดพื้นที่: {bar_roi[2]} × {bar_roi[3]} px")
-                if hasattr(self, "main_action_btn") and not self.running and not getattr(self, "start_pending", False):
-                    self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
-            else:
-                self.roi_summary.configure(text="ยังไม่กำหนดแถบมินิเกม")
-                if hasattr(self, "roi_size_label"):
-                    self.roi_size_label.configure(text="ขนาดพื้นที่: ยังไม่ได้กำหนด")
-                if hasattr(self, "main_action_btn") and not self.running and not getattr(self, "start_pending", False):
-                    self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
-                    if hasattr(self, "action_guidance_lbl") and self.status_text_lbl.cget("text") != "ข้อผิดพลาด":
-                        self.action_guidance_lbl.configure(text="⚠️  กรุณาเลือกพื้นที่บนหน้าจอในขั้นตอนที่ 1 ก่อนเริ่ม", fg="#f59e0b")
+        rois = self.settings.get("rois", {}) if isinstance(self.settings, dict) else {}
+        bar_ready = bool(rois.get("bar"))
+        if bar_ready:
+            bar_roi = rois["bar"]
+            self.roi_summary.configure(text=f"แถบมินิเกม: {bar_roi[2]} × {bar_roi[3]} px")
+            if hasattr(self, "roi_size_label"):
+                self.roi_size_label.configure(text=f"ขนาดพื้นที่: {bar_roi[2]} × {bar_roi[3]} px")
+            if hasattr(self, "main_action_btn") and not self.running and not getattr(self, "start_pending", False):
+                self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
+        else:
+            self.roi_summary.configure(text="ยังไม่กำหนดแถบมินิเกม")
+            if hasattr(self, "roi_size_label"):
+                self.roi_size_label.configure(text="ขนาดพื้นที่: ยังไม่ได้กำหนด")
+            if hasattr(self, "main_action_btn") and not self.running and not getattr(self, "start_pending", False):
+                self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
+                if hasattr(self, "action_guidance_lbl") and self.status_text_lbl.cget("text") != "ข้อผิดพลาด":
+                    self.action_guidance_lbl.configure(text="⚠️  กรุณาเลือกพื้นที่บนหน้าจอในขั้นตอนที่ 1 ก่อนเริ่ม", fg="#f59e0b")
 
     def _read_ui(self):
-        fps_val = 60
-        if hasattr(self, "vars") and "gamescope_fps" in self.vars:
-            try:
-                fps_val = int(self.vars["gamescope_fps"].get())
-            except (ValueError, TypeError):
-                fps_val = 60
-        res_val = str(self.vars["gamescope_res"].get()) if "gamescope_res" in self.vars else "1280x720"
-        fs_val = bool(self.vars["gamescope_fullscreen"].get()) if "gamescope_fullscreen" in self.vars else False
         return {
             "fishing_mode": str(self.vars["fishing_mode"].get()),
             "cast_seconds": float(self.vars["cast_seconds"].get()),
@@ -1832,9 +1560,6 @@ class FishingApp:
             "right_on_hold": bool(self.vars["right"].get()),
             "bite_ack": bool(self.vars["ack"].get()),
             "debug": bool(self.vars["debug"].get()),
-            "gamescope_fps": fps_val,
-            "gamescope_res": res_val,
-            "gamescope_fullscreen": fs_val,
             "rois": self.settings.get("rois", {}),
         }
 
@@ -1912,21 +1637,46 @@ class FishingApp:
         self._set_status(f"กำลังเตรียมจับภาพ {area_names.get(name, name)}…")
         self.root.after(700, lambda: self._capture_area(name))
 
+    def _save_roi_selection(self, name, area, bounds, image):
+        if name == "template":
+            try:
+                crop_x = max(0, area[0] - bounds[0])
+                crop_y = max(0, area[1] - bounds[1])
+                crop = image[crop_y : crop_y + area[3], crop_x : crop_x + area[2]]
+                if cv2 is not None:
+                    TEMPLATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    cv2.imwrite(str(TEMPLATE_FILE), crop)
+            except Exception:
+                pass
+            self._set_status("บันทึกภาพตัวอย่างสัญญาณปลากินเบ็ดแล้ว")
+        else:
+            self.settings.setdefault("rois", {})[name] = area
+            save_settings(self.settings)
+            self._set_status("เลือกพื้นที่แล้ว")
+            if name == "bar":
+                try:
+                    crop_x = max(0, area[0] - bounds[0])
+                    crop_y = max(0, area[1] - bounds[1])
+                    crop = image[crop_y : crop_y + area[3], crop_x : crop_x + area[2]]
+                    self._update_preview_display(crop)
+                except Exception:
+                    pass
+        self._update_readiness()
+
     def _capture_area(self, name):
-        area_names = {"bar": "แถบมินิเกม", "cast": "แถบเหวี่ยงเบ็ด", "bite": "สัญญาณปลากินเบ็ด", "template": "ภาพตัวอย่างสัญญาณ"}
         try:
-            if self.env_mode == "gamescope":
-                image = self._capture_gamescope_window()
-                bounds = (0, 0, image.shape[1], image.shape[0])
-            else:
-                bounds = primary_screen_bounds()
-                capture = ScreenCapture()
-                image = capture.grab(bounds)
-                capture.close()
+            bounds = primary_screen_bounds()
+            capture = ScreenCapture()
+            image = capture.grab(bounds)
+            capture.close()
         except Exception as exc:
             self.root.deiconify()
             self._set_status(f"จับภาพพื้นที่ไม่ได้: {exc}")
             return
+        self._open_roi_canvas(image, bounds, name)
+
+    def _open_roi_canvas(self, image, bounds, name):
+        area_names = {"bar": "แถบมินิเกม", "cast": "แถบเหวี่ยงเบ็ด", "bite": "สัญญาณปลากินเบ็ด", "template": "ภาพตัวอย่างสัญญาณ"}
         self.root.deiconify()
         picker = self.tk.Toplevel(self.root)
         picker.title(f"ลากกรอบพื้นที่ {area_names.get(name, name)}")
@@ -2075,9 +1825,7 @@ class FishingApp:
             orig_w = min(img_w - orig_x, orig_w)
             orig_h = min(img_h - orig_y, orig_h)
 
-            area = [orig_x if self.env_mode == "gamescope" else bounds[0] + orig_x,
-                    orig_y if self.env_mode == "gamescope" else bounds[1] + orig_y,
-                    orig_w, orig_h]
+            area = [bounds[0] + orig_x, bounds[1] + orig_y, orig_w, orig_h]
             selected_area[0] = area
             info_label.configure(text=f"เลือก: กว้าง {orig_w} × สูง {orig_h} px")
             confirm_btn.configure(state="normal")
@@ -2087,51 +1835,7 @@ class FishingApp:
             area = selected_area[0]
             if not area:
                 return
-            if self.env_mode == "gamescope":
-                if name == "template":
-                    try:
-                        crop = image[area[1] : area[1] + area[3], area[0] : area[0] + area[2]]
-                        if cv2 is not None:
-                            TEMPLATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-                            cv2.imwrite(str(TEMPLATE_FILE), crop)
-                    except Exception:
-                        pass
-                    self._set_status("บันทึกภาพตัวอย่างสัญญาณปลากินเบ็ดแล้ว")
-                else:
-                    self.settings.setdefault("gamescope_rois", {})[name] = area
-                    save_settings(self.settings)
-                    self._set_status("เลือกพื้นที่สำหรับ Gamescope แล้ว")
-                    if name == "bar":
-                        try:
-                            crop = image[area[1] : area[1] + area[3], area[0] : area[0] + area[2]]
-                            self._update_preview_display(crop)
-                        except Exception:
-                            pass
-            else:
-                if name == "template":
-                    try:
-                        crop_x = area[0] - bounds[0]
-                        crop_y = area[1] - bounds[1]
-                        crop = image[crop_y : crop_y + area[3], crop_x : crop_x + area[2]]
-                        if cv2 is not None:
-                            TEMPLATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-                            cv2.imwrite(str(TEMPLATE_FILE), crop)
-                    except Exception:
-                        pass
-                    self._set_status("บันทึกภาพตัวอย่างสัญญาณปลากินเบ็ดแล้ว")
-                else:
-                    self.settings.setdefault("rois", {})[name] = area
-                    save_settings(self.settings)
-                    self._set_status("เลือกพื้นที่แล้ว")
-                    if name == "bar":
-                        try:
-                            crop_x = max(0, area[0] - bounds[0])
-                            crop_y = max(0, area[1] - bounds[1])
-                            crop = image[crop_y : crop_y + area[3], crop_x : crop_x + area[2]]
-                            self._update_preview_display(crop)
-                        except Exception:
-                            pass
-            self._update_readiness()
+            self._save_roi_selection(name, area, bounds, image)
             picker.destroy()
 
         def cancel(event=None):
@@ -2229,12 +1933,7 @@ class FishingApp:
     def start(self):
         if (self.running or getattr(self, "start_pending", False)
                 or getattr(self, "test_hold_pending", False)
-                or getattr(self, "test_hold_active", False)
-                or getattr(self, "gamescope_launch_pending", False)):
-            return
-
-        if self.env_mode == "gamescope":
-            self._start_gamescope()
+                or getattr(self, "test_hold_active", False)):
             return
 
         try:
@@ -2255,109 +1954,6 @@ class FishingApp:
             if hasattr(self, "main_action_btn"):
                 self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
             self._set_status(f"เริ่มไม่ได้: {exc}")
-
-    def _start_gamescope(self):
-        try:
-            rois = self.settings.get("gamescope_rois", {})
-            if not rois.get("bar"):
-                raise RuntimeError("จำเป็นต้องกำหนดพื้นที่แถบมินิเกมสำหรับโหมด Gamescope")
-
-            session = gm.find_active_gamescope_session()
-            if not session or not session.get("target_window_id"):
-                raise RuntimeError("ไม่พบเกมใน Gamescope กรุณาเปิดเกมด้วย run_gamescope.sh ก่อน")
-
-            disp_str = session["display"]
-            win_id = session["target_window_id"]
-
-            from gamescope_worker import worker_process_main
-
-            parent_pipe, child_pipe = multiprocessing.Pipe()
-            self.gamescope_pipe = parent_pipe
-            self.gamescope_worker_proc = multiprocessing.Process(
-                target=worker_process_main,
-                args=(child_pipe, disp_str, win_id),
-                daemon=True,
-            )
-            self.gamescope_worker_proc.start()
-
-            if not parent_pipe.poll(timeout=3.5):
-                raise RuntimeError("Worker process timed out during initialization")
-            init_msg = parent_pipe.recv()
-            if init_msg[0] != "CONNECTED":
-                raise RuntimeError(f"Worker failed to connect: {init_msg}")
-
-            worker_settings = dict(self._read_ui())
-            worker_settings["rois"] = dict(rois)
-            worker_settings["template_file"] = str(TEMPLATE_FILE)
-            parent_pipe.send(("START", worker_settings))
-
-            self.running = True
-            self.stop_requested.clear()
-            self.hotkey_cleanup = register_stop(self.stop_requested.set)
-            self._set_mode_widgets_state("disabled")
-            if hasattr(self, "main_action_btn"):
-                self.main_action_btn.configure(text="■  หยุด Auto (F8)", style="Danger.TButton")
-
-            mode = worker_settings.get("fishing_mode", "rod")
-            mode_name = MODE_CONFIGS.get(mode, MODE_CONFIGS["rod"])["name"]
-            self._set_status(f"กำลังทำงานในจอแยก (Gamescope) — โหมด{mode_name} — ใช้งานจอ 2 ได้ตามปกติ")
-            self.root.after(20, self._pump_gamescope)
-        except Exception as exc:
-            self.stop(f"เริ่มไม่ได้: {exc}")
-
-    def _pump_gamescope(self):
-        if not self.running or self.env_mode != "gamescope":
-            return
-        if self.stop_requested.is_set():
-            self.stop("หยุดฉุกเฉินด้วย F8")
-            return
-        if not self.gamescope_worker_proc or not self.gamescope_worker_proc.is_alive():
-            self.stop("Worker process terminated unexpectedly")
-            return
-
-        now = time.monotonic()
-        if now - self.gamescope_last_ping > 1.5:
-            self.gamescope_last_ping = now
-            try:
-                self.gamescope_pipe.send(("PING",))
-            except Exception:
-                pass
-
-        try:
-            while self.gamescope_pipe and self.gamescope_pipe.poll():
-                packet = self.gamescope_pipe.recv()
-                msg_type = packet[0]
-                if msg_type == "STATUS":
-                    st = packet[1]
-                    state = st.get("state", "Track")
-                    reason = st.get("reason", "")
-                    fps = st.get("fps", 0.0)
-                    obs = st.get("observation_bar", "")
-                    if self.settings.get("debug") and st.get("telemetry"):
-                        t = st["telemetry"]
-                        self._set_status(
-                            f"[ดีบัก-Gamescope] ช่อง:[{t.get('target_left', 0):.0f},{t.get('target_right', 0):.0f}] "
-                            f"กลาง:{t.get('target_center', 0):.0f} • ตัวชี้:{t.get('marker_x', 0):.0f} "
-                            f"v:{t.get('velocity', 0):+.0f}px/s • สั่ง:{t.get('action', '')}"
-                        )
-                    elif obs == "absent" and state in ("Track", "End"):
-                        self._set_status("ตรวจไม่พบเป้าหมาย กำลังค้นหาใหม่")
-                    else:
-                        self._set_status(f"{state}: {reason or 'tracking'} | {fps:.1f} FPS")
-                elif msg_type == "PREVIEW":
-                    crop_img, bar_res = packet[1], packet[2]
-                    self._update_preview_display(crop_img, bar_res)
-                elif msg_type == "STOPPED":
-                    self.stop(packet[1])
-                    return
-                elif msg_type == "ERROR":
-                    self.stop(f"ข้อผิดพลาด: {packet[1]}")
-                    return
-        except Exception as exc:
-            self.stop(f"IPC error: {exc}")
-            return
-
-        self.root.after(20, self._pump_gamescope)
 
     def _start_now(self, settings):
         if not getattr(self, "start_pending", False):
@@ -2495,23 +2091,6 @@ class FishingApp:
         was_running = self.running
         self.running = False
 
-        if hasattr(self, "gamescope_pipe") and self.gamescope_pipe:
-            try:
-                self.gamescope_pipe.send(("STOP", reason or "stopped"))
-                self.gamescope_pipe.send(("TERMINATE",))
-            except Exception:
-                pass
-            self.gamescope_pipe = None
-
-        if hasattr(self, "gamescope_worker_proc") and self.gamescope_worker_proc:
-            try:
-                self.gamescope_worker_proc.join(timeout=0.6)
-                if self.gamescope_worker_proc.is_alive():
-                    self.gamescope_worker_proc.terminate()
-            except Exception:
-                pass
-            self.gamescope_worker_proc = None
-
         self._set_mode_widgets_state("normal")
         if hasattr(self, "main_action_btn"):
             self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
@@ -2534,17 +2113,29 @@ class FishingApp:
 
     def close(self):
         self._closing = True
-        if getattr(self, "gamescope_status_job", None) is not None:
-            try:
-                self.root.after_cancel(self.gamescope_status_job)
-            except Exception:
-                pass
-            self.gamescope_status_job = None
         self.stop()
-        if hasattr(self, "spawned_gamescope_proc") and self.spawned_gamescope_proc:
-            gm.stop_process_safely(self.spawned_gamescope_proc)
-            self.spawned_gamescope_proc = None
         self.root.destroy()
+
+
+def get_app_class():
+    """Dynamically return the platform-specific UI class (Linux vs Windows)."""
+    system = platform.system()
+    if system == "Windows":
+        try:
+            from ui_windows import WindowsFishingApp
+            return WindowsFishingApp
+        except Exception:
+            return BaseFishingApp
+    elif system == "Linux":
+        try:
+            from ui_linux import LinuxFishingApp
+            return LinuxFishingApp
+        except Exception:
+            return BaseFishingApp
+    return BaseFishingApp
+
+
+FishingApp = get_app_class()
 
 
 def replay_frames(directory: str | os.PathLike[str]) -> list[tuple[str, float | None, tuple[float, float] | None]]:
@@ -2576,7 +2167,8 @@ def main() -> None:
     except ImportError as exc:
         raise SystemExit("Tkinter is required to run the control window") from exc
     root = tk.Tk()
-    FishingApp(root)
+    app_cls = get_app_class()
+    app_cls(root)
     root.mainloop()
 
 

@@ -7,4 +7,4 @@ fi
 if [ -d "$ROOT/.runtime/usr/lib/tk8.6" ]; then
     export TK_LIBRARY="$ROOT/.runtime/usr/lib/tk8.6"
 fi
-exec "$ROOT/.venv/bin/python" "$ROOT/auto_fishing.py" "$@"
+exec "$ROOT/.venv/bin/python" "$ROOT/ui_linux.py" "$@"

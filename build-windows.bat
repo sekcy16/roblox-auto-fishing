@@ -21,10 +21,10 @@ if errorlevel 1 (
   echo Required Windows GUI libraries are unavailable. Reinstall Python 3.12 with Tcl/Tk enabled.
   goto :failed
 )
-.venv-windows\Scripts\python.exe -m unittest test_auto_fishing test_desktop_control tests.test_ui_redesign -v
+.venv-windows\Scripts\python.exe -m unittest test_auto_fishing test_desktop_control tests.test_ui_redesign tests.test_platform_dispatch -v
 if errorlevel 1 goto :failed
 
-.venv-windows\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.6 --version-file windows-version-info.txt auto_fishing.py
+.venv-windows\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.6 --version-file windows-version-info.txt --exclude-module gamescope_worker --exclude-module gamescope_manager --exclude-module Xlib --exclude-module ui_linux ui_windows.py
 if errorlevel 1 goto :failed
 
 if exist "release\RobloxAutoFishing-v0.0.6" rmdir /s /q "release\RobloxAutoFishing-v0.0.6"

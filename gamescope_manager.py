@@ -14,12 +14,42 @@ import time
 from pathlib import Path
 from typing import Any
 
-from Xlib import X, display
-from Xlib.error import XError
+try:
+    from Xlib import X, display
+    from Xlib.error import XError
+except (ImportError, Exception):  # pragma: no cover
+    X = None
+    display = None
+    XError = Exception
 
 
 class GamescopeLaunchError(RuntimeError):
     """A launch failed before a usable Gamescope display appeared."""
+
+
+def is_sober_running() -> bool:
+    """Check if a Flatpak Sober or Roblox window/process is already active."""
+    try:
+        session = find_active_gamescope_session()
+        if session and session.get("target_window_id"):
+            return True
+    except Exception:
+        pass
+
+    try:
+        proc_dir = Path("/proc")
+        if proc_dir.is_dir():
+            for p in proc_dir.iterdir():
+                if p.name.isdigit():
+                    try:
+                        cmdline = (p / "cmdline").read_bytes().lower()
+                        if b"org.vinegarhq.sober" in cmdline or b"/app/bin/sober" in cmdline:
+                            return True
+                    except (OSError, PermissionError):
+                        continue
+    except Exception:
+        pass
+    return False
 
 
 def get_available_x_displays() -> list[str]:
