@@ -41,7 +41,8 @@ else:
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "0.0.6"
+APP_VERSION = "0.0.7"
+BUILD_ID = time.strftime("%Y%m%d-%H%M", time.localtime())
 
 
 def user_data_dir(system: str | None = None, environ: dict[str, str] | None = None) -> Path:
@@ -55,6 +56,35 @@ def user_data_dir(system: str | None = None, environ: dict[str, str] | None = No
 DATA_DIR = user_data_dir()
 SETTINGS_FILE = DATA_DIR / "settings.json"
 TEMPLATE_FILE = DATA_DIR / "bite-template.png"
+DEBUG_LOG_FILE = DATA_DIR / "debug.log"
+
+
+def log_diagnostic_event(event_type: str, data: dict[str, Any]) -> None:
+    """Write diagnostic transitions, failures, and telemetry to %LOCALAPPDATA%/RobloxAutoFishing/debug.log."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if DEBUG_LOG_FILE.exists() and DEBUG_LOG_FILE.stat().st_size > 5 * 1024 * 1024:
+            old_file = DATA_DIR / "debug.log.old"
+            try:
+                if old_file.exists():
+                    old_file.unlink()
+                DEBUG_LOG_FILE.rename(old_file)
+            except Exception:
+                pass
+        ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        log_entry = {
+            "timestamp": ts,
+            "version": APP_VERSION,
+            "build": BUILD_ID,
+            "event": event_type,
+            **data,
+        }
+        with open(DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 MODE_CONFIGS = {
     "rod": {
         "name": "เบ็ดตกปลา",
@@ -306,6 +336,8 @@ class Controller:
         self.state = "Idle"
         self.reason = ""
         self.held = False
+        self.desired_held = False
+        self.actual_held = False
         self.cast_started = self.wait_started = self.absent_started = None
         self.valid_streak = self.bite_streak = self.bite_clear_streak = 0
         self.bite_latched = False
@@ -324,6 +356,20 @@ class Controller:
         self.focus_lost_since = None
         self.capture_fail_streak = 0
 
+    def sync_held(self, actual_held: bool) -> None:
+        """Synchronize Controller's held state with verified physical/executor state."""
+        self.actual_held = bool(actual_held)
+        self.held = bool(actual_held)
+
+    def acknowledge_action(self, action: str, ok: bool) -> None:
+        """Update confirmed held state based on whether the action succeeded."""
+        if action == "hold":
+            self.actual_held = bool(ok)
+            self.held = bool(ok)
+        elif action == "release":
+            self.actual_held = not bool(ok)
+            self.held = not bool(ok)
+
     def start(self, now: float) -> None:
         self.state, self.reason = "Cast", ""
         self.cast_started = float(now)
@@ -332,6 +378,8 @@ class Controller:
         self.ambiguous_streak = 0
         self.bite_latched = False
         self.held = False
+        self.desired_held = True
+        self.actual_held = False
         self.previous_x = self.previous_time = None
         self.velocity = 0.0
         self.last_switch_action = None
@@ -344,8 +392,10 @@ class Controller:
         self.capture_fail_streak = 0
 
     def stop(self, reason: str = "stopped by user") -> str:
+        self.desired_held = False
         action = "release" if self.held else "none"
         self.held = False
+        self.actual_held = False
         self.state, self.reason = "Paused", reason
         self.pre_focus_state = None
         self.resume_stable_frames = 0
@@ -353,8 +403,10 @@ class Controller:
         return action
 
     def _pause(self, reason: str) -> str:
+        self.desired_held = False
         action = "release" if self.held else "none"
         self.held = False
+        self.actual_held = False
         self.state, self.reason = "Paused", reason
         return action
 
@@ -364,6 +416,7 @@ class Controller:
         self.valid_streak = self.bite_streak = self.bite_clear_streak = 0
         self.ambiguous_streak = 0
         self.bite_latched = False
+        self.desired_held = True
         self.held = True
         return "hold"
 
@@ -435,6 +488,7 @@ class Controller:
 
         desired = choose_hold(x, target, self.velocity, total_latency, margin,
                               bool(self.settings["right_on_hold"]), self.held)
+        self.desired_held = desired
 
         action = "none"
         if entering:
@@ -462,6 +516,8 @@ class Controller:
             "error": round(float(error), 1),
             "action": action,
             "held": self.held,
+            "desired_held": self.desired_held,
+            "actual_held": self.actual_held,
         }
 
         return action
@@ -472,8 +528,10 @@ class Controller:
 
         # 1. Graceful focus handling: never immediately permanently kill Auto
         if not focused:
+            self.desired_held = False
             action = "release" if self.held else "none"
             self.held = False
+            self.actual_held = False
             if self.state not in ("Idle", "Paused", "FocusWait"):
                 self.pre_focus_state = self.state
                 self.state = "FocusWait"
@@ -490,6 +548,7 @@ class Controller:
         if self.state == "FocusWait":
             self.focus_lost_since = None
             if observation is None:
+                self.desired_held = False
                 self.capture_fail_streak += 1
                 if self.capture_fail_streak >= 30:
                     return self._pause("screen capture failed consistently")
@@ -527,6 +586,8 @@ class Controller:
                     self.pre_focus_state = None
                     self.cast_started = now
                     self.held = False
+                    self.desired_held = True
+                    self.actual_held = False
                     return "none"
                 elif self.pre_focus_state == "End":
                     self.state = "End"
@@ -544,8 +605,10 @@ class Controller:
 
         # 3. Screen capture transient failure tolerance
         if observation is None:
+            self.desired_held = False
             action = "release" if self.held else "none"
             self.held = False
+            self.actual_held = False
             self.capture_fail_streak += 1
             if self.capture_fail_streak >= 30:
                 return self._pause("screen capture failed consistently")
@@ -555,15 +618,20 @@ class Controller:
 
         status, x, target = self._bar(observation)
         if self.state in ("Idle", "Paused"):
+            self.desired_held = False
             return "none"
         if self.state == "Cast":
             if not self.held:
+                self.desired_held = True
                 self.held = True
                 return "hold"
             if now - float(self.cast_started) >= float(self.settings["cast_seconds"]):
+                self.desired_held = False
                 self.held = False
+                self.actual_held = False
                 self.state, self.wait_started = "Wait", now
                 return "release"
+            self.desired_held = True
             return "none"
         bite = bool(observation.get("bite", False))
         if bite:
@@ -575,6 +643,7 @@ class Controller:
             if self.bite_clear_streak >= 3:
                 self.bite_latched = False
         if self.state == "Wait":
+            self.desired_held = False
             is_net = (self.settings.get("fishing_mode") == "net")
             if not is_net and self.settings.get("bite_ack", True) and self.bite_streak >= 3 and not self.bite_latched:
                 self.bite_latched = True
@@ -583,6 +652,7 @@ class Controller:
                 return self._track_step(now, x, target, capture_time=capture_time)
             return "none"
         if self.state == "End":
+            self.desired_held = False
             if status == "valid" and x is not None and target is not None:
                 return self._track_step(now, x, target, capture_time=capture_time)
             if self.absent_started is None:
@@ -600,12 +670,18 @@ class Controller:
             if status != "valid" or x is None or target is None:
                 self.previous_x = self.previous_time = None
                 self.absent_started = self.absent_started if self.absent_started is not None else now
+                self.desired_held = False
                 action = "release" if self.held else "none"
                 self.held = False
+                self.actual_held = False
                 self.state, self.absent_started = "End", now
                 return action
             return self._track_step(now, x, target, capture_time=capture_time)
         return "none"
+
+
+# Alias for backward compatibility
+FishingController = Controller
 
 
 def _load_pyautogui():
@@ -616,8 +692,8 @@ def _load_pyautogui():
     return _pyautogui
 
 
-def release_mouse() -> None:
-    """Release the left button, tolerating cleanup during focus loss/shutdown."""
+def raw_release_mouse() -> ActionResult:
+    """Release the left button via PyAutoGUI, returning a structured ActionResult."""
     global _mouse_held
     with _input_lock:
         try:
@@ -628,10 +704,24 @@ def release_mouse() -> None:
                 pyautogui.mouseUp(button="left")
             finally:
                 pyautogui.FAILSAFE = old_failsafe
-        except Exception:
-            pass
-        finally:
             _mouse_held = False
+            return ActionResult(True, "ok", "ปล่อยเมาส์สำเร็จ")
+        except Exception as exc:
+            _mouse_held = False
+            return ActionResult(False, "mouse_up_failed", f"ปล่อยเมาส์ล้มเหลว: {exc}", exc)
+
+
+def emergency_release_mouse() -> None:
+    """Safely release the mouse during exit/hotkey/error without raising exceptions."""
+    try:
+        raw_release_mouse()
+    except Exception:
+        pass
+
+
+def release_mouse() -> ActionResult:
+    """Backward-compatible release_mouse returning ActionResult while not raising."""
+    return raw_release_mouse()
 
 
 def _inside(point: tuple[int, int], bounds: tuple[int, int, int, int]) -> bool:
@@ -639,42 +729,150 @@ def _inside(point: tuple[int, int], bounds: tuple[int, int, int, int]) -> bool:
     return x <= point[0] < x + w and y <= point[1] < y + h
 
 
-def apply_action(action: str, target_snapshot: tuple[int, tuple[int, int, int, int]] | None) -> bool:
+class ActionResult:
+    """Structured result of an input action execution."""
+
+    def __init__(
+        self,
+        ok: bool,
+        reason: str = "ok",
+        detail: str = "",
+        exception: Exception | None = None,
+        winerror: int | None = None,
+    ):
+        self.ok = ok
+        self.reason = reason
+        self.detail = detail
+        self.exception = exception
+        self.winerror = winerror
+
+    def __bool__(self) -> bool:
+        return bool(self.ok)
+
+    def __getitem__(self, item: str) -> Any:
+        return getattr(self, item)
+
+    def get(self, item: str, default: Any = None) -> Any:
+        return getattr(self, item, default)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "reason": self.reason,
+            "detail": self.detail,
+            "exception": str(self.exception) if self.exception else None,
+            "winerror": self.winerror,
+        }
+
+    def __repr__(self) -> str:
+        return f"ActionResult(ok={self.ok}, reason={self.reason!r}, detail={self.detail!r})"
+
+
+def apply_action(
+    action: str,
+    target_snapshot: tuple[int, tuple[int, int, int, int]] | None,
+    safe_move: bool = False,
+) -> ActionResult:
     """Apply one state transition only when the target window still matches."""
     global _mouse_held
     with _input_lock:
         if action in ("none", ""):
-            return True
+            return ActionResult(True, "ok", "ไม่มีคำสั่ง")
         if action == "release":
-            release_mouse()
-            return True
+            return release_mouse()
         if target_snapshot is None:
             release_mouse()
-            return False
+            return ActionResult(False, "target_missing", "ยังไม่ได้เลือกหน้าต่างเกม")
         target_wid, target_bounds = target_snapshot
         snap = window_snapshot()
-        if snap is None or snap[0] != target_wid:
+        if snap is None:
             release_mouse()
-            return False
+            if not is_window_alive(target_wid):
+                return ActionResult(False, "target_closed", "หน้าต่างเกมถูกปิดแล้ว")
+            return ActionResult(False, "target_not_foreground", "ไม่พบหน้าต่างที่อยู่ด้านหน้า")
+        if snap[0] != target_wid:
+            release_mouse()
+            if not is_window_alive(target_wid):
+                return ActionResult(False, "target_closed", "หน้าต่างเกมถูกปิดแล้ว")
+            return ActionResult(
+                False,
+                "foreground_hwnd_mismatch",
+                f"หน้าต่างด้านหน้า (HWND {snap[0]}) ไม่ตรงกับเป้าหมาย (HWND {target_wid})",
+            )
         current_bounds = snap[1]
         try:
             pyautogui = _load_pyautogui()
+        except Exception as exc:
+            release_mouse()
+            return ActionResult(False, "pyautogui_import_failed", f"โหลด PyAutoGUI ไม่สำเร็จ: {exc}", exc)
+
+        try:
             mouse_pos = tuple(pyautogui.position())
+        except Exception as exc:
+            release_mouse()
+            return ActionResult(False, "mouse_position_failed", f"อ่านตำแหน่งเมาส์ไม่สำเร็จ: {exc}", exc)
+
+        if not _inside(mouse_pos, current_bounds):
+            if safe_move:
+                safe_x = current_bounds[0] + max(10, current_bounds[2] // 2)
+                safe_y = current_bounds[1] + max(10, current_bounds[3] // 2)
+                try:
+                    old_failsafe = getattr(pyautogui, "FAILSAFE", True)
+                    try:
+                        pyautogui.FAILSAFE = False
+                        pyautogui.moveTo(safe_x, safe_y)
+                    finally:
+                        pyautogui.FAILSAFE = old_failsafe
+                    mouse_pos = tuple(pyautogui.position())
+                except Exception as exc:
+                    release_mouse()
+                    return ActionResult(
+                        False,
+                        "cursor_outside_target",
+                        f"เลื่อนเมาส์เข้าเกมไม่สำเร็จ: {exc}",
+                        exc,
+                    )
+
             if not _inside(mouse_pos, current_bounds):
                 release_mouse()
-                return False
+                return ActionResult(
+                    False,
+                    "cursor_outside_target",
+                    "เมาส์อยู่นอกหน้าต่าง Roblox — กรุณาวางเมาส์ในเกม",
+                )
+
+        try:
             if action == "hold":
                 if not _mouse_held:
-                    pyautogui.mouseDown(button="left")
+                    old_failsafe = getattr(pyautogui, "FAILSAFE", True)
+                    try:
+                        pyautogui.FAILSAFE = False
+                        pyautogui.mouseDown(button="left")
+                    finally:
+                        pyautogui.FAILSAFE = old_failsafe
                     _mouse_held = True
-                return True
+                return ActionResult(True, "ok", "กดค้างสำเร็จ")
             if action == "click":
-                pyautogui.click(button="left")
-                return True
-        except Exception:
+                old_failsafe = getattr(pyautogui, "FAILSAFE", True)
+                try:
+                    pyautogui.FAILSAFE = False
+                    pyautogui.click(button="left")
+                finally:
+                    pyautogui.FAILSAFE = old_failsafe
+                return ActionResult(True, "ok", "คลิกสำเร็จ")
+        except Exception as exc:
             release_mouse()
-            return False
-        return False
+            exc_str = str(exc).lower()
+            if "access denied" in exc_str or "permission" in exc_str or getattr(exc, "winerror", None) == 5:
+                return ActionResult(
+                    False,
+                    "input_blocked_by_privilege_level",
+                    "การส่งอินพุตถูกบล็อกโดยระบบสิทธิ์ Windows (UIPI) — กรุณารัน Auto Fishing ด้วยสิทธิ์ Administrator",
+                    exc,
+                )
+            reason = "mouse_down_failed" if action == "hold" else "click_failed"
+            return ActionResult(False, reason, f"ส่งคำสั่งเมาส์ล้มเหลว: {exc}", exc)
+        return ActionResult(False, "unknown_action", f"คำสั่งไม่รู้จัก: {action}")
 
 
 def _windows_snapshot():
@@ -801,7 +999,14 @@ def focus_window(wid: int) -> bool:
             if user32.IsIconic(hwnd):
                 user32.ShowWindow(hwnd, 9)  # SW_RESTORE
             user32.SetForegroundWindow(hwnd)
-            return True
+            fg = user32.GetForegroundWindow()
+            fg_val = fg.value if isinstance(fg, ctypes.c_void_p) else fg
+            if int(fg_val or 0) == wid:
+                return True
+            time.sleep(0.05)
+            fg = user32.GetForegroundWindow()
+            fg_val = fg.value if isinstance(fg, ctypes.c_void_p) else fg
+            return int(fg_val or 0) == wid
         except Exception:
             return False
     if not os.environ.get("DISPLAY") or (os.environ.get("WAYLAND_DISPLAY") and os.environ.get("XDG_SESSION_TYPE") == "wayland"):
@@ -864,6 +1069,36 @@ def primary_screen_bounds() -> tuple[int, int, int, int]:
         user32 = ctypes.windll.user32
         return (0, 0, int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1)))
     raise RuntimeError("could not determine the primary monitor bounds")
+
+
+def get_virtual_screen_bounds() -> tuple[int, int, int, int]:
+    """Return the total virtual screen bounds covering all connected monitors."""
+    if platform.system() == "Windows":
+        try:
+            user32 = ctypes.windll.user32
+            # SM_XVIRTUALSCREEN = 76, SM_YVIRTUALSCREEN = 77, SM_CXVIRTUALSCREEN = 78, SM_CYVIRTUALSCREEN = 79
+            vx = int(user32.GetSystemMetrics(76))
+            vy = int(user32.GetSystemMetrics(77))
+            vw = int(user32.GetSystemMetrics(78))
+            vh = int(user32.GetSystemMetrics(79))
+            if vw > 0 and vh > 0:
+                return (vx, vy, vw, vh)
+        except Exception:
+            pass
+    try:
+        import mss
+        mss_cls = getattr(mss, "MSS", getattr(mss, "mss", None))
+        with mss_cls() as capture:
+            monitors = capture.monitors
+            if monitors:
+                m0 = monitors[0]
+                return (int(m0["left"]), int(m0["top"]), int(m0["width"]), int(m0["height"]))
+    except Exception:
+        pass
+    try:
+        return primary_screen_bounds()
+    except Exception:
+        return (0, 0, 1920, 1080)
 
 
 def set_dpi_awareness() -> None:
@@ -1170,6 +1405,7 @@ class BaseFishingApp:
             "ack": self.tk.BooleanVar(value=bool(self.settings.get("bite_ack", DEFAULT_SETTINGS["bite_ack"]))),
             "debug": self.tk.BooleanVar(value=bool(self.settings.get("debug", DEFAULT_SETTINGS.get("debug", False)))),
             "auto_refocus": self.tk.BooleanVar(value=bool(self.settings.get("auto_refocus", False))),
+            "test_hold_duration": self.tk.StringVar(value="1.0"),
         }
 
     def _on_mode_change(self):
@@ -1544,8 +1780,23 @@ class BaseFishingApp:
 
         extra_row = self.tk.Frame(self.advanced_frame, bg=BG_CARD)
         extra_row.pack(fill="x", pady=(6, 2))
-        self.ttk.Button(extra_row, text="ทดลองกดค้าง 0.1 วินาที", style="Secondary.TButton", command=self.test_hold).pack(side="left")
+        self.btn_test_hold = self.ttk.Button(extra_row, text="⚡ ทดลองกดค้าง", style="Secondary.TButton", command=self.test_hold)
+        self.btn_test_hold.pack(side="left")
+        self.test_hold_combo = self.ttk.Combobox(
+            extra_row,
+            textvariable=self.vars["test_hold_duration"],
+            values=["0.5", "1.0", "2.0"],
+            width=5,
+            state="readonly",
+        )
+        self.test_hold_combo.pack(side="left", padx=(4, 4))
+        self.tk.Label(extra_row, text="วินาที", fg=TEXT_MUTED, bg=BG_CARD, font=(self.ui_font, 9)).pack(side="left")
         self.ttk.Button(extra_row, text="เลือกพื้นที่เพิ่มเติม...", style="Secondary.TButton", command=self.select_rois).pack(side="right")
+
+        diag_row = self.tk.Frame(self.advanced_frame, bg=BG_CARD)
+        diag_row.pack(fill="x", pady=(4, 2))
+        self.ttk.Button(diag_row, text="📋 คัดลอกผลวินิจฉัย (Diagnostics)", style="Secondary.TButton", command=self.copy_diagnostics).pack(side="left")
+        self.ttk.Button(diag_row, text="📂 เปิดโฟลเดอร์ Log", style="Secondary.TButton", command=self.open_log_folder).pack(side="right")
         self._build_advanced_extra(self.advanced_frame)
 
         self._draw_preview_placeholder()
@@ -1962,7 +2213,11 @@ class BaseFishingApp:
 
     def _capture_area(self, name):
         try:
-            bounds = primary_screen_bounds()
+            if self.target and len(self.target) >= 2 and is_window_alive(self.target[0]):
+                cur_bounds = get_window_bounds(self.target[0]) or self.target[1]
+                bounds = cur_bounds
+            else:
+                bounds = get_virtual_screen_bounds()
             capture = ScreenCapture()
             image = capture.grab(bounds)
             capture.close()
@@ -2164,7 +2419,12 @@ class BaseFishingApp:
         confirm_btn.pack(side="right")
 
     def _settings(self):
-        return validate_settings(self._read_ui(), primary_screen_bounds())
+        target_bounds = None
+        if self.target and len(self.target) >= 2:
+            target_bounds = self.target[1]
+        if not target_bounds:
+            target_bounds = get_virtual_screen_bounds()
+        return validate_settings(self._read_ui(), target_bounds)
 
     def preview(self):
         if self.running or self.start_pending or self.test_hold_pending or self.test_hold_active:
@@ -2190,43 +2450,151 @@ class BaseFishingApp:
             self._set_status("หยุดการทำงานก่อนทดลองกดค้าง")
             return
         if not self.target:
-            self._set_status("ทดลองกดค้างไม่ได้: ต้องโฟกัสเกมและวางตัวชี้ไว้ในหน้าต่างเกม")
+            self._set_status("ทดลองกดค้างไม่ได้: ต้องเลือกหน้าต่างเกมก่อน")
             return
+        try:
+            dur_str = self.vars["test_hold_duration"].get() if "test_hold_duration" in self.vars else "1.0"
+            self.test_hold_duration = float(dur_str)
+        except Exception:
+            self.test_hold_duration = 1.0
         try:
             self.stop_requested.clear()
             if not getattr(self, "_global_hotkey_cleanup", None):
                 self.hotkey_cleanup = register_stop(self.stop_requested.set)
             self.test_hold_pending = True
-            self._set_status("สลับไปที่เกมภายใน 3 วินาทีเพื่อทดลองกดค้าง")
-            self.test_hold_id = self.root.after(3000, self._begin_test_hold)
+            self.test_hold_countdown = 3
+            self._set_status("สลับไปที่เกมภายใน 3 วินาทีเพื่อทดลองกดค้าง (F8 เพื่อยกเลิก)")
+            self.test_hold_id = self.root.after(1000, self._update_test_hold_countdown)
         except Exception as exc:
             self.test_hold_pending = False
-            release_mouse()
+            if hasattr(self, "executor"):
+                self.executor.emergency_release()
+            else:
+                release_mouse()
             self._set_status(f"ทดลองกดค้างไม่ได้: {exc}")
 
+    def _update_test_hold_countdown(self):
+        if not getattr(self, "test_hold_pending", False):
+            return
+        if self.stop_requested.is_set():
+            self.stop("หยุดฉุกเฉินด้วย F8")
+            return
+        if self.test_hold_countdown > 0:
+            self._set_status(f"สลับไปที่เกม Roblox ภายใน {self.test_hold_countdown} วินาทีเพื่อทดลองกดค้าง (F8 เพื่อยกเลิก)")
+            self.test_hold_countdown -= 1
+            self.test_hold_id = self.root.after(1000, self._update_test_hold_countdown)
+        else:
+            self._begin_test_hold()
+
     def _begin_test_hold(self):
-        if not self.test_hold_pending:
+        if not getattr(self, "test_hold_pending", False):
             return
         self.test_hold_pending = False
         self.test_hold_id = None
-        if self.stop_requested.is_set() or window_snapshot() != self.target:
-            self.stop("หยุดฉุกเฉินด้วย F8" if self.stop_requested.is_set() else "หยุดการทำงาน")
+        if self.stop_requested.is_set():
+            self.stop("หยุดฉุกเฉินด้วย F8")
             return
-        if not apply_action("hold", self.target):
-            self.stop("ทดลองกดค้างไม่ได้: โฟกัสหรือตัวชี้เปลี่ยนตำแหน่ง")
+        if not self.target:
+            self.stop("ยังไม่ได้เลือกหน้าต่างเกม")
             return
+
+        target_wid = self.target[0]
+        if not is_window_alive(target_wid):
+            self.stop("หน้าต่างเกมถูกปิดแล้ว")
+            return
+
+        snap = window_snapshot()
+        if snap is None or snap[0] != target_wid:
+            self.stop("ทดลองกดค้างไม่ได้: หน้าต่าง Roblox ไม่ได้อยู่ด้านหน้า")
+            return
+
+        # Update bounds if window moved
+        self.target = snap
+
+        if hasattr(self, "executor"):
+            res = self.executor.apply("hold", self.target, safe_move=True)
+        else:
+            res = apply_action("hold", self.target, safe_move=True)
+
+        if not res:
+            self.stop(f"ทดลองกดค้างล้มเหลว: {res.detail or res.reason}")
+            return
+
         self.test_hold_active = True
-        self._set_status("กำลังกดค้าง 0.1 วินาที")
-        self.test_hold_id = self.root.after(100, self._finish_test_hold)
+        dur = getattr(self, "test_hold_duration", 1.0)
+        self._set_status(f"กำลังกดค้าง {dur:.1f} วินาที...")
+        ms = max(50, int(dur * 1000))
+        self.test_hold_id = self.root.after(ms, self._finish_test_hold)
 
     def _finish_test_hold(self):
-        self.test_hold_active = False
-        self.test_hold_id = None
-        release_mouse()
-        if self.hotkey_cleanup:
-            self.hotkey_cleanup()
-            self.hotkey_cleanup = None
-        self._set_status("หยุดฉุกเฉินด้วย F8" if self.stop_requested.is_set() else "ทดลองกดค้างเสร็จแล้ว")
+        try:
+            self.test_hold_active = False
+            self.test_hold_id = None
+        finally:
+            if hasattr(self, "executor"):
+                self.executor.emergency_release()
+            else:
+                release_mouse()
+            if self.hotkey_cleanup:
+                try:
+                    self.hotkey_cleanup()
+                except Exception:
+                    pass
+                self.hotkey_cleanup = None
+        dur = getattr(self, "test_hold_duration", 1.0)
+        backend = getattr(getattr(self, "executor", None), "backend", "pyautogui").upper()
+        target_wid = self.target[0] if self.target else None
+        snap = window_snapshot()
+        fg_wid = snap[0] if snap else None
+        if self.stop_requested.is_set():
+            self._set_status("หยุดฉุกเฉินด้วย F8")
+        else:
+            self._set_status(
+                f"✅ [{backend}] ทดลองกดค้างและปล่อยแล้ว (เป้าหมาย HWND {target_wid} | หน้าต่างหน้า HWND {fg_wid} | กดค้าง {dur:.1f}s)"
+            )
+
+    def copy_diagnostics(self) -> None:
+        try:
+            summary = self._collect_diagnostic_summary()
+            self.root.clipboard_clear()
+            self.root.clipboard_append(summary)
+            self._set_status("📋 คัดลอกผลวินิจฉัยลง Clipboard แล้ว")
+        except Exception as exc:
+            self._set_status(f"คัดลอกผลวินิจฉัยไม่ได้: {exc}")
+
+    def open_log_folder(self) -> None:
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            if platform.system() == "Windows":
+                os.startfile(str(DATA_DIR))
+            else:
+                subprocess.run(["xdg-open", str(DATA_DIR)], check=False)
+            self._set_status("📂 เปิดโฟลเดอร์ Log แล้ว")
+        except Exception as exc:
+            self._set_status(f"เปิดโฟลเดอร์ Log ไม่ได้: {exc}")
+
+    def _collect_diagnostic_summary(self) -> str:
+        snap = window_snapshot()
+        lines = [
+            f"=== Roblox Auto Fishing Diagnostic Report ===",
+            f"Version: {APP_VERSION} (Build {BUILD_ID})",
+            f"OS: {platform.system()} {platform.release()} ({platform.architecture()[0]})",
+            f"Mode: {getattr(self, 'env_mode', 'desktop')}",
+            f"Target HWND: {self.target[0] if self.target else None}",
+            f"Target Bounds: {self.target[1] if self.target else None}",
+            f"Foreground HWND: {snap[0] if snap else None}",
+            f"Controller State: {getattr(self.controller, 'state', None)}",
+            f"Desired Held: {getattr(self.controller, 'desired_held', None)}",
+            f"Actual Held: {getattr(getattr(self, 'executor', None), 'actual_held', _mouse_held)}",
+            f"Executor Backend: {getattr(getattr(self, 'executor', None), 'backend', 'N/A')}",
+            f"Failure Streak: {getattr(self, 'input_failure_streak', 0)}",
+            f"Log File: {DEBUG_LOG_FILE}",
+        ]
+        if hasattr(self, "recent_events") and self.recent_events:
+            lines.append("--- Recent Events ---")
+            for ev in list(self.recent_events)[-10:]:
+                lines.append(f"  {ev}")
+        return "\n".join(lines)
 
     def start(self):
         if (self.running or getattr(self, "start_pending", False)
@@ -2340,7 +2708,17 @@ class BaseFishingApp:
             pyautogui = _load_pyautogui()
             mouse_pos = tuple(pyautogui.position())
             if not _inside(mouse_pos, cur_bounds):
-                return "mouse_outside", cur_bounds
+                safe_x = cur_bounds[0] + max(10, cur_bounds[2] // 2)
+                safe_y = cur_bounds[1] + max(10, cur_bounds[3] // 2)
+                old_failsafe = getattr(pyautogui, "FAILSAFE", True)
+                try:
+                    pyautogui.FAILSAFE = False
+                    pyautogui.moveTo(safe_x, safe_y)
+                finally:
+                    pyautogui.FAILSAFE = old_failsafe
+                mouse_pos = tuple(pyautogui.position())
+                if not _inside(mouse_pos, cur_bounds):
+                    return "mouse_outside", cur_bounds
         except Exception:
             pass
 
@@ -2385,6 +2763,10 @@ class BaseFishingApp:
             self.capture = ScreenCapture()
             _set_fast_input_timing()
             self.running = True
+            self.input_failure_streak = 0
+            executor = getattr(self, "executor", None)
+            if executor is not None and hasattr(executor, "emergency_release"):
+                executor.emergency_release()
             self.fps_count, self.fps_started = 0, time.monotonic()
             if hasattr(self, "main_action_btn"):
                 self.main_action_btn.configure(text="■  หยุด Auto (F8)", style="Danger.TButton")
@@ -2394,13 +2776,48 @@ class BaseFishingApp:
             self.root.after(0, self._pump)
         except Exception as exc:
             self._set_mode_widgets_state("normal")
-            release_mouse()
+            emergency_release_mouse()
+            executor = getattr(self, "executor", None)
+            if executor is not None and hasattr(executor, "emergency_release"):
+                executor.emergency_release()
             if self.hotkey_cleanup:
                 self.hotkey_cleanup()
                 self.hotkey_cleanup = None
             if hasattr(self, "main_action_btn"):
                 self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
             self._set_status(f"เริ่มไม่ได้: {exc}")
+
+    def _log_action_telemetry(self, action: str, result: Any) -> None:
+        """Record telemetry for an action transition without spamming idle frames."""
+        target_wid = self.target[0] if self.target else None
+        target_bounds = self.target[1] if self.target else None
+        snap = window_snapshot()
+        fg_wid = snap[0] if snap else None
+        cursor_pos = None
+        try:
+            pyautogui = _load_pyautogui()
+            cursor_pos = tuple(pyautogui.position())
+        except Exception:
+            pass
+        ok = bool(result)
+        reason = getattr(result, "reason", "ok" if ok else "unknown")
+        detail = getattr(result, "detail", "")
+        exc = getattr(result, "exception", None)
+        self._log_debug_event("action_telemetry", {
+            "controller_action": action,
+            "target_hwnd": target_wid,
+            "foreground_hwnd": fg_wid,
+            "cursor_pos": cursor_pos,
+            "target_bounds": target_bounds,
+            "mouse_held": getattr(self, "mouse_held", _mouse_held),
+            "ok": ok,
+            "reason": reason,
+            "detail": detail,
+            "exception": str(exc) if exc else None,
+            "winerror": getattr(result, "winerror", None),
+            "desired_held": getattr(getattr(self, "controller", None), "desired_held", None),
+            "actual_held": getattr(getattr(self, "executor", None), "actual_held", getattr(getattr(self, "controller", None), "actual_held", None)),
+        })
 
     def _pump(self):
         if not self.running:
@@ -2481,14 +2898,58 @@ class BaseFishingApp:
             return
 
         action = self.controller.step(now, observation, focused, capture_time=capture_time)
-        if not apply_action(action, self.target):
+
+        # State reconciliation if out of sync between Controller and Executor
+        executor = getattr(self, "executor", None)
+        actual_held = getattr(executor, "actual_held", None) if executor is not None else None
+        if actual_held is None:
+            actual_held = getattr(self.controller, "actual_held", False)
+        else:
+            self.controller.sync_held(actual_held)
+
+        if action == "none" and self.controller.desired_held != actual_held:
+            action = "hold" if self.controller.desired_held else "release"
+
+        if executor is not None and hasattr(executor, "apply"):
+            res = executor.apply(action, self.target, safe_move=True)
+        else:
+            res = apply_action(action, self.target, safe_move=True)
+
+        if action in ("hold", "release"):
+            self.controller.acknowledge_action(action, bool(res))
+            if executor is not None and hasattr(executor, "actual_held"):
+                self.controller.sync_held(executor.actual_held)
+
+        if not res:
+            self.input_failure_streak = getattr(self, "input_failure_streak", 0) + 1
             # Transient input failure (e.g. mouse moved out during frame) - release mouse safely
-            release_mouse()
+            emergency_release_mouse()
+            if executor is not None and hasattr(executor, "emergency_release"):
+                executor.emergency_release()
+            self.controller.sync_held(False)
+            if getattr(res, "reason", "") == "cursor_outside_target":
+                self._set_status("เมาส์อยู่นอกหน้าต่าง Roblox — กรุณาวางเมาส์ในเกม")
+            elif getattr(res, "reason", "") in ("target_not_foreground", "foreground_hwnd_mismatch"):
+                self._set_status("รอโฟกัสเกม — หน้าต่าง Roblox ไม่ได้อยู่ด้านหน้า")
+            elif getattr(res, "reason", "") == "input_blocked_by_privilege_level":
+                self._set_status("ส่งคำสั่งเมาส์ไม่ได้: สิทธิ์ไม่เพียงพอ — แนะนำให้รันด้วยสิทธิ์เดียวกับ Roblox")
+            else:
+                detail = getattr(res, "detail", "") or getattr(res, "reason", "")
+                self._set_status(f"ส่งคำสั่งเมาส์ไม่ได้: {detail}")
+
+            if self.input_failure_streak >= 15:
+                self.stop("หยุดเนื่องจากส่งคำสั่งเมาส์ล้มเหลวติดต่อกันเกินกำหนด")
+                return
+        else:
+            self.input_failure_streak = 0
+
+        if action not in ("none", "") or not res:
+            self._log_action_telemetry(action, res)
 
         elapsed = now - self.fps_started
         fps = self.fps_count / elapsed if elapsed > 0 else 0.0
 
-        if target_status == "ready" and observation is not None:
+        if target_status == "ready" and observation is not None and bool(res):
             if self.settings.get("debug") and getattr(self.controller, "telemetry", None) and self.controller.state == "Track":
                 t = self.controller.telemetry
                 self._set_status(
@@ -2543,7 +3004,10 @@ class BaseFishingApp:
         previous_reason = controller.reason if controller else ""
         if controller:
             controller.stop(reason or previous_reason or "stopped by user")
-        release_mouse()
+        emergency_release_mouse()
+        executor = getattr(self, "executor", None)
+        if executor is not None and hasattr(executor, "emergency_release"):
+            executor.emergency_release()
         _restore_input_timing()
         capture = getattr(self, "capture", None)
         if capture:

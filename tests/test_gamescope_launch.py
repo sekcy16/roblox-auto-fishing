@@ -2,9 +2,13 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
+
+if not sys.platform.startswith("linux"):
+    raise unittest.SkipTest("Gamescope launch tests require Linux")
 
 import gamescope_manager as gm
 from auto_fishing import FishingApp

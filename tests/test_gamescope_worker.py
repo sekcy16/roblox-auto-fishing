@@ -10,6 +10,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+if not sys.platform.startswith("linux"):
+    raise unittest.SkipTest("Gamescope worker tests require Linux")
+
 import gamescope_manager as gm
 from gamescope_worker import GamescopeWorker
 

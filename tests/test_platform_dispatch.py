@@ -306,5 +306,38 @@ class WindowsInputScriptTests(unittest.TestCase):
             self.assertIsNone(twi._active_held_hwnd)
 
 
+class WindowsWindowDetectionTests(unittest.TestCase):
+    """Regression tests for choosing Roblox instead of this controller window."""
+
+    def test_auto_fishing_window_is_never_a_roblox_target(self):
+        import ui_windows
+
+        self.assertFalse(ui_windows._is_roblox_game_window(
+            "Roblox Auto Fishing 0.0.6 (Windows)", "TkTopLevel", 1234
+        ))
+
+    def test_roblox_studio_is_not_a_player_target(self):
+        import ui_windows
+
+        self.assertFalse(ui_windows._is_roblox_game_window(
+            "Roblox Studio", "WINDOWSCLIENT", 1234
+        ))
+
+    def test_windowsclient_player_is_a_valid_target(self):
+        import ui_windows
+
+        self.assertTrue(ui_windows._is_roblox_game_window(
+            "Roblox", "WINDOWSCLIENT", 1234
+        ))
+
+    def test_current_process_is_never_a_target(self):
+        import os
+        import ui_windows
+
+        self.assertFalse(ui_windows._is_roblox_game_window(
+            "Roblox", "WINDOWSCLIENT", os.getpid()
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()

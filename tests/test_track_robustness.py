@@ -3,6 +3,7 @@ window identity decoupling, and mode-specific input isolation.
 """
 
 import collections
+import sys
 import unittest
 from unittest import mock
 
@@ -195,6 +196,7 @@ class TrackRobustnessTests(unittest.TestCase):
             self.assertTrue(res)
 
     # 6. Gamescope และ Windows Dual-screen: desktop focus ไม่ทำให้ Track หยุด
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Gamescope worker requires Linux")
     def test_6_gamescope_and_dual_screen_independent_of_desktop_focus(self):
         # Gamescope worker: doesn't check desktop window snapshot
         from gamescope_worker import GamescopeWorker
