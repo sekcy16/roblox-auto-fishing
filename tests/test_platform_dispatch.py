@@ -313,7 +313,7 @@ class WindowsWindowDetectionTests(unittest.TestCase):
         import ui_windows
 
         self.assertFalse(ui_windows._is_roblox_game_window(
-            "Roblox Auto Fishing 0.0.6 (Windows)", "TkTopLevel", 1234
+            "Roblox Auto Fishing 0.0.7 (Windows)", "TkTopLevel", 1234
         ))
 
     def test_roblox_studio_is_not_a_player_target(self):
