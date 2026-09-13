@@ -68,6 +68,9 @@ DEFAULT_SETTINGS = {
     "bite_threshold": 0.85,
     "bite_ack": True,
     "debug": False,
+    "gamescope_fps": 60,
+    "gamescope_res": "1280x720",
+    "gamescope_fullscreen": False,
     "rois": {"bar": None, "bite": None},
     "gamescope_rois": {"bar": None, "bite": None},
 }
@@ -98,6 +101,14 @@ def validate_settings(data: dict[str, Any], screen_bounds: tuple[int, int, int, 
     if not isinstance(mode, str) or mode not in MODE_CONFIGS:
         raise ValueError("ประเภทอุปกรณ์ตกปลาต้องเป็น 'rod' หรือ 'net'")
     result["fishing_mode"] = str(mode)
+    try:
+        gs_fps = int(result.get("gamescope_fps", 60))
+        result["gamescope_fps"] = gs_fps if 30 <= gs_fps <= 360 else 60
+    except (ValueError, TypeError):
+        result["gamescope_fps"] = 60
+    res = str(result.get("gamescope_res", "1280x720"))
+    result["gamescope_res"] = res if "x" in res else "1280x720"
+    result["gamescope_fullscreen"] = bool(result.get("gamescope_fullscreen", False))
     for key, low, high in (("cast_seconds", 0.05, 10.0), ("lead", 0.0, 0.5),
                            ("margin", 0.0, None), ("bite_threshold", 0.0, 1.0)):
         value = result.get(key)
@@ -138,28 +149,28 @@ def detect_bar(bgr: Any) -> tuple[str, float | None, tuple[float, float] | None]
         return "absent", None, None
     image = np.ascontiguousarray(bgr[:, :, :3], dtype=np.uint8)
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    purple = cv2.inRange(hsv, (110, 25, 40), (168, 255, 255))
-    white = cv2.inRange(hsv, (0, 0, 195), (179, 50, 255))
+    purple = cv2.inRange(hsv, (108, 22, 35), (170, 255, 255))
+    white = cv2.inRange(hsv, (0, 0, 160), (179, 60, 255))
 
     def components(mask):
         _, _, stats, _ = cv2.connectedComponentsWithStats(mask)
         return [tuple(map(int, row)) for row in stats[1:]]
 
     markers = [(x, y, w, h) for x, y, w, h, area in components(white)
-               if 6 <= h <= 80 and 3 <= w <= h * 1.2
-               and area >= w * h * 0.50]
+               if 4 <= h <= 80 and 2 <= w <= max(14, int(h * 1.8))
+               and area >= min(5, w * h * 0.35)]
 
     raw_targets = [(x, y, w, h) for x, y, w, h, area in components(purple)
-                   if 4 <= h <= 64 and w >= 3
-                   and area >= min(6, w * h * 0.35)]
+                   if 3 <= h <= 64 and w >= 2
+                   and area >= min(5, w * h * 0.30)]
     if not raw_targets:
         return "absent", None, None
 
     def aligned(a, b):
         _, y, _, h = a
         _, other_y, _, other_h = b
-        return (0.4 <= h / other_h <= 2.5
-                and abs(y + h / 2.0 - other_y - other_h / 2.0) <= max(3.0, min(h, other_h) * 0.35))
+        return (0.35 <= h / max(1, other_h) <= 2.8
+                and abs(y + h / 2.0 - other_y - other_h / 2.0) <= max(3.5, min(h, other_h) * 0.45))
 
     raw_targets.sort()
     merged = []
@@ -170,14 +181,14 @@ def detect_bar(bgr: Any) -> tuple[str, float | None, tuple[float, float] | None]
             px, py, pw, ph = previous
             gap_left, gap_right = px + pw, x
             if aligned(previous, target):
-                if 0 <= gap_right - gap_left <= 4:
+                if 0 <= gap_right - gap_left <= 5:
                     top, bottom = min(py, y), max(py + ph, y + h)
                     merged[index] = (px, top, x + w - px, bottom - top)
                     joined = True
                     break
-                elif 0 <= gap_right - gap_left <= max(h, ph) * 2.0:
-                    covering = any(aligned(marker, target) and mx <= gap_left + 3
-                                   and mx + mw >= gap_right - 3
+                elif 0 <= gap_right - gap_left <= max(h, ph) * 2.5:
+                    covering = any(aligned(marker, target) and mx <= gap_left + 4
+                                   and mx + mw >= gap_right - 4
                                    for marker in markers for mx, my, mw, mh in [marker])
                     if covering:
                         top, bottom = min(py, y), max(py + ph, y + h)
@@ -187,7 +198,7 @@ def detect_bar(bgr: Any) -> tuple[str, float | None, tuple[float, float] | None]
         if not joined:
             merged.append(target)
 
-    valid_targets = [t for t in merged if t[2] >= 8]
+    valid_targets = [t for t in merged if t[2] >= 5]
     if not valid_targets:
         return "absent", None, None
 
@@ -866,6 +877,9 @@ class FishingApp:
             "right": tk.BooleanVar(value=bool(self.settings.get("right_on_hold", DEFAULT_SETTINGS["right_on_hold"]))),
             "ack": tk.BooleanVar(value=bool(self.settings.get("bite_ack", DEFAULT_SETTINGS["bite_ack"]))),
             "debug": tk.BooleanVar(value=bool(self.settings.get("debug", DEFAULT_SETTINGS.get("debug", False)))),
+            "gamescope_fps": tk.StringVar(value=str(self.settings.get("gamescope_fps", DEFAULT_SETTINGS["gamescope_fps"]))),
+            "gamescope_res": tk.StringVar(value=str(self.settings.get("gamescope_res", DEFAULT_SETTINGS.get("gamescope_res", "1280x720")))),
+            "gamescope_fullscreen": tk.BooleanVar(value=bool(self.settings.get("gamescope_fullscreen", DEFAULT_SETTINGS.get("gamescope_fullscreen", False)))),
         }
         self.status = tk.StringVar(value="พร้อม — เลือกพื้นที่บนหน้าจอเพื่อเริ่ม")
         self._build()
@@ -888,7 +902,7 @@ class FishingApp:
             self.env_mode = new_env
             self.settings["env_mode"] = new_env
             save_settings(self.settings)
-            self._refresh_gamescope_status()
+            self._refresh_ope_status()
             self._update_readiness()
             self._restore_mode_preview()
 
@@ -967,6 +981,29 @@ class FishingApp:
 
         self.gamescope_launch_pending = True
         self.gamescope_launch_error = None
+        if hasattr(self, "vars"):
+            if "gamescope_fps" in self.vars:
+                try:
+                    fps_val = int(self.vars["gamescope_fps"].get())
+                    self.settings["gamescope_fps"] = fps_val
+                    sober_cfg = Path.home() / ".var/app/org.vinegarhq.Sober/config/sober/config.json"
+                    if sober_cfg.exists():
+                        try:
+                            with open(sober_cfg, "r", encoding="utf-8") as f:
+                                text = f.read()
+                            import re
+                            text = re.sub(r'"DFIntTaskSchedulerTargetFps":\s*\d+', f'"DFIntTaskSchedulerTargetFps": {fps_val}', text)
+                            with open(sober_cfg, "w", encoding="utf-8") as f:
+                                f.write(text)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            if "gamescope_res" in self.vars:
+                self.settings["gamescope_res"] = str(self.vars["gamescope_res"].get())
+            if "gamescope_fullscreen" in self.vars:
+                self.settings["gamescope_fullscreen"] = bool(self.vars["gamescope_fullscreen"].get())
+            save_settings(self.settings)
         self._set_gamescope_launch_button("disabled")
         if hasattr(self, "gamescope_status_badge"):
             self.gamescope_status_badge.configure(text="🟡 กำลังเปิด Gamescope...", fg="#fbbf24", bg="#451a03")
@@ -976,7 +1013,44 @@ class FishingApp:
     def _launch_gamescope_worker(self):
         proc = None
         try:
-            proc, discovered = gm.launch_sober_in_gamescope()
+            fps_val = 60
+            if hasattr(self, "vars") and "gamescope_fps" in self.vars:
+                try:
+                    fps_val = int(self.vars["gamescope_fps"].get())
+                except (ValueError, TypeError):
+                    fps_val = 60
+            elif isinstance(self.settings, dict):
+                try:
+                    fps_val = int(self.settings.get("gamescope_fps", 60))
+                except (ValueError, TypeError):
+                    fps_val = 60
+
+            res_str = "1280x720"
+            if hasattr(self, "vars") and "gamescope_res" in self.vars:
+                res_str = str(self.vars["gamescope_res"].get())
+            elif isinstance(self.settings, dict):
+                res_str = str(self.settings.get("gamescope_res", "1280x720"))
+
+            w_val, h_val = 1280, 720
+            if "x" in res_str:
+                try:
+                    w_s, h_s = res_str.split("x", 1)
+                    w_val, h_val = int(w_s), int(h_s)
+                except Exception:
+                    w_val, h_val = 1280, 720
+
+            fs_val = False
+            if hasattr(self, "vars") and "gamescope_fullscreen" in self.vars:
+                fs_val = bool(self.vars["gamescope_fullscreen"].get())
+            elif isinstance(self.settings, dict):
+                fs_val = bool(self.settings.get("gamescope_fullscreen", False))
+
+            proc, discovered = gm.launch_sober_in_gamescope(
+                width=w_val,
+                height=h_val,
+                fullscreen=fs_val,
+                refresh_rate=fps_val,
+            )
             error = None if discovered else "ไม่พบจอ Gamescope ภายใน 10 วินาที — ตรวจว่า Gamescope และไดรเวอร์ X11 พร้อมใช้งาน"
         except Exception as exc:
             discovered = None
@@ -1094,6 +1168,12 @@ class FishingApp:
             self.btn_launch_gs.configure(
                 state="disabled" if state == "disabled" or self.gamescope_launch_pending else "normal"
             )
+        for w in ("gs_fps_cb", "gs_res_cb", "gs_fs_cb"):
+            if hasattr(self, w):
+                try:
+                    getattr(self, w).configure(state=state)
+                except Exception:
+                    pass
 
     def _build(self):
         self.root.title(f"Roblox Auto Fishing — Auto Tracking {APP_VERSION}")
@@ -1275,12 +1355,30 @@ class FishingApp:
 
         gs_actions = self.tk.Frame(mode_card, bg=BG_CARD)
         gs_actions.pack(fill="x", pady=(6, 0))
-        self.btn_refresh_gs = self.ttk.Button(gs_actions, text="🔄 ตรวจ Gamescope",
+
+        fps_frame = self.tk.Frame(gs_actions, bg=BG_CARD)
+        fps_frame.pack(side="left")
+        self.tk.Label(fps_frame, text="⚡ ขนาด:", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 9)).pack(side="left", padx=(0, 2))
+        self.gs_res_cb = self.ttk.Combobox(fps_frame, textvariable=self.vars["gamescope_res"],
+                                           values=("1280x720", "1600x900", "1920x1080", "960x540"), width=8)
+        self.gs_res_cb.pack(side="left", padx=(0, 6))
+
+        self.tk.Label(fps_frame, text="FPS:", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 9)).pack(side="left", padx=(0, 2))
+        self.gs_fps_cb = self.ttk.Combobox(fps_frame, textvariable=self.vars["gamescope_fps"],
+                                           values=("60", "90", "120", "144", "165", "240"), width=4)
+        self.gs_fps_cb.pack(side="left", padx=(0, 6))
+
+        self.gs_fs_cb = self.ttk.Checkbutton(fps_frame, text="เต็มจอ", variable=self.vars["gamescope_fullscreen"])
+        self.gs_fs_cb.pack(side="left")
+
+        self.btn_refresh_gs = self.ttk.Button(gs_actions, text="🔄 ตรวจ",
                                               style="Secondary.TButton", command=self._refresh_gamescope_status)
         self.btn_refresh_gs.pack(side="right")
-        self.btn_launch_gs = self.ttk.Button(gs_actions, text="▶ เปิด Sober ใน Gamescope",
+        self.btn_launch_gs = self.ttk.Button(gs_actions, text="▶ เปิด Sober",
                                              style="Secondary.TButton", command=self._launch_gamescope)
-        self.btn_launch_gs.pack(side="right", padx=(0, 6))
+        self.btn_launch_gs.pack(side="right", padx=(0, 4))
 
         # Step 1: เลือกพื้นที่
         step1_card = self.tk.Frame(outer, bg=BG_CARD, padx=12, pady=10,
@@ -1422,6 +1520,11 @@ class FishingApp:
         self.tk.Label(tuning, text="ความเข้มงวดสัญญาณปลากิน (0–1)", fg=TEXT_MAIN, bg=BG_CARD,
                       font=(self.ui_font, 10)).grid(row=4, column=0, sticky="w", pady=3)
         self.ttk.Entry(tuning, textvariable=self.vars["threshold"], width=8).grid(row=4, column=1, sticky="w", padx=8, pady=3)
+
+        self.tk.Label(tuning, text="Gamescope FPS (Hz)", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 10)).grid(row=5, column=0, sticky="w", pady=3)
+        self.ttk.Combobox(tuning, textvariable=self.vars["gamescope_fps"],
+                          values=("60", "90", "120", "144", "165", "240"), width=7).grid(row=5, column=1, sticky="w", padx=8, pady=3)
 
         cb_frame = self.tk.Frame(self.advanced_frame, bg=BG_CARD)
         cb_frame.pack(fill="x", pady=(4, 4))
@@ -1712,6 +1815,14 @@ class FishingApp:
                         self.action_guidance_lbl.configure(text="⚠️  กรุณาเลือกพื้นที่บนหน้าจอในขั้นตอนที่ 1 ก่อนเริ่ม", fg="#f59e0b")
 
     def _read_ui(self):
+        fps_val = 60
+        if hasattr(self, "vars") and "gamescope_fps" in self.vars:
+            try:
+                fps_val = int(self.vars["gamescope_fps"].get())
+            except (ValueError, TypeError):
+                fps_val = 60
+        res_val = str(self.vars["gamescope_res"].get()) if "gamescope_res" in self.vars else "1280x720"
+        fs_val = bool(self.vars["gamescope_fullscreen"].get()) if "gamescope_fullscreen" in self.vars else False
         return {
             "fishing_mode": str(self.vars["fishing_mode"].get()),
             "cast_seconds": float(self.vars["cast_seconds"].get()),
@@ -1721,6 +1832,9 @@ class FishingApp:
             "right_on_hold": bool(self.vars["right"].get()),
             "bite_ack": bool(self.vars["ack"].get()),
             "debug": bool(self.vars["debug"].get()),
+            "gamescope_fps": fps_val,
+            "gamescope_res": res_val,
+            "gamescope_fullscreen": fs_val,
             "rois": self.settings.get("rois", {}),
         }
 

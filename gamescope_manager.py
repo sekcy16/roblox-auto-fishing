@@ -132,12 +132,25 @@ def get_window_geometry(disp_name: str, window_id: int) -> tuple[int, int, int, 
         return None
 
 
+def get_default_refresh_rate() -> int:
+    """Return configured or detected default refresh rate."""
+    env_val = os.environ.get("GAMESCOPE_REFRESH")
+    if env_val:
+        try:
+            val = int(env_val)
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+    return 60
+
+
 def launch_sober_in_gamescope(
     display_index: int = 0,
-    width: int = 1920,
-    height: int = 1080,
-    fullscreen: bool = True,
-    refresh_rate: int = 60,
+    width: int = 1280,
+    height: int = 720,
+    fullscreen: bool = False,
+    refresh_rate: int | None = None,
     timeout: float = 10.0,
     poll_interval: float = 0.25,
 ) -> tuple[subprocess.Popen[Any], str | None]:
@@ -145,6 +158,8 @@ def launch_sober_in_gamescope(
 
     Returns (process, discovered_display).
     """
+    if refresh_rate is None:
+        refresh_rate = get_default_refresh_rate()
     existing = set(get_available_x_displays())
     cmd = build_gamescope_command(
         display_index=display_index,
@@ -193,19 +208,24 @@ def launch_sober_in_gamescope(
 
 def build_gamescope_command(
     display_index: int = 0,
-    width: int = 1920,
-    height: int = 1080,
-    fullscreen: bool = True,
-    refresh_rate: int = 60,
+    width: int = 1280,
+    height: int = 720,
+    fullscreen: bool = False,
+    refresh_rate: int | None = None,
 ) -> list[str]:
     """Build the Gamescope command with matching nested output timing."""
+    if refresh_rate is None:
+        refresh_rate = get_default_refresh_rate()
     cmd = [
         "gamescope",
         "-W", str(width),
         "-H", str(height),
         "-r", str(refresh_rate),
         "-o", str(refresh_rate),
+        "--framerate-limit", str(refresh_rate),
         "--display-index", str(display_index),
+        "--force-grab-cursor",
+        "--immediate-flips",
     ]
     if fullscreen:
         cmd.append("-f")

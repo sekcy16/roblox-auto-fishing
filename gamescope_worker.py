@@ -134,19 +134,38 @@ class GamescopeWorker:
             return False
         return False
 
+    def _safe_send(self, data: Any) -> bool:
+        """Safely send data over the IPC pipe, suppressing broken pipe on UI exit."""
+        try:
+            self.pipe.send(data)
+            return True
+        except (BrokenPipeError, EOFError, OSError):
+            self.running = False
+            return False
+
     def run(self) -> None:
         """Main worker loop handling IPC messages and the fishing cycle."""
         if not self.connect():
-            self.pipe.send(("ERROR", f"Could not connect to window {hex(self.window_id)} on {self.display_str}"))
+            self._safe_send(("ERROR", f"Could not connect to window {hex(self.window_id)} on {self.display_str}"))
             return
 
-        self.pipe.send(("CONNECTED", {"display": self.display_str, "window_id": self.window_id}))
+        self._safe_send(("CONNECTED", {"display": self.display_str, "window_id": self.window_id}))
 
         try:
             while True:
                 # 1. Process all pending commands from UI
-                while self.pipe.poll():
-                    cmd, *args = self.pipe.recv()
+                try:
+                    has_data = self.pipe.poll()
+                except (BrokenPipeError, EOFError, OSError):
+                    self.release_mouse()
+                    return
+
+                while has_data:
+                    try:
+                        cmd, *args = self.pipe.recv()
+                    except (BrokenPipeError, EOFError, OSError):
+                        self.release_mouse()
+                        return
                     self.last_heartbeat = time.monotonic()
 
                     if cmd == "TERMINATE":
@@ -163,10 +182,16 @@ class GamescopeWorker:
 
                     elif cmd == "CAPTURE_FULL":
                         full_img = self.capture_full_window()
-                        self.pipe.send(("FULL_IMAGE", full_img))
+                        self._safe_send(("FULL_IMAGE", full_img))
 
                     elif cmd == "PING":
-                        self.pipe.send(("PONG", time.monotonic()))
+                        self._safe_send(("PONG", time.monotonic()))
+
+                    try:
+                        has_data = self.pipe.poll()
+                    except (BrokenPipeError, EOFError, OSError):
+                        self.release_mouse()
+                        return
 
                 # 2. Safety Timeout: if UI died or stopped communicating for >3s while running
                 now = time.monotonic()
@@ -179,28 +204,27 @@ class GamescopeWorker:
                 else:
                     time.sleep(0.05)
 
+        except KeyboardInterrupt:
+            self.release_mouse()
         finally:
             self.release_mouse()
-            if self.d:
+            if getattr(self, "d", None):
                 try:
                     self.d.close()
                 except Exception:
                     pass
 
     def start_fishing(self) -> None:
-        """Initialize Controller and enter Cast state."""
-        rois = self.settings.get("rois", {})
-        bar_roi = rois.get("bar")
-        if not bar_roi or len(bar_roi) != 4:
-            self.pipe.send(("ERROR", "ต้องกำหนดพื้นที่แถบมินิเกมก่อนเริ่ม"))
+        """Initialize detection templates and controller state, then begin tick loop."""
+        if not self.settings or "rois" not in self.settings or not self.settings["rois"].get("bar"):
+            self._safe_send(("ERROR", "ต้องกำหนดพื้นที่แถบมินิเกมก่อนเริ่ม"))
             return
 
         self.controller = Controller(self.settings)
-        now = time.monotonic()
-        self.controller.start(now)
+        self.controller.start(time.monotonic())
         self.running = True
         self.fps_count = 0
-        self.fps_start = now
+        self.fps_start = time.monotonic()
         self.last_preview_time = 0.0
 
         # Load bite template if available
@@ -211,7 +235,7 @@ class GamescopeWorker:
         else:
             self.template = None
 
-        self.pipe.send(("STATUS", {
+        self._safe_send(("STATUS", {
             "state": self.controller.state,
             "reason": self.controller.reason,
             "fps": 0.0,
@@ -224,7 +248,7 @@ class GamescopeWorker:
         if self.controller:
             self.controller.stop(reason)
         self.release_mouse()
-        self.pipe.send(("STOPPED", reason))
+        self._safe_send(("STOPPED", reason))
 
     def tick(self) -> None:
         """Execute one frame of capture, detection, and input."""
@@ -270,8 +294,8 @@ class GamescopeWorker:
         # Throttled status and preview dispatch to UI (~8 FPS preview for smooth responsiveness)
         if now - self.last_preview_time > 0.12:
             self.last_preview_time = now
-            self.pipe.send(("PREVIEW", bar_image, bar))
-            self.pipe.send(("STATUS", {
+            self._safe_send(("PREVIEW", bar_image, bar))
+            self._safe_send(("STATUS", {
                 "state": self.controller.state,
                 "reason": self.controller.reason,
                 "fps": fps,
