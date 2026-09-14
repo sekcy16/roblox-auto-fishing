@@ -41,7 +41,7 @@ else:
 
 
 ROOT = Path(__file__).resolve().parent
-APP_VERSION = "0.0.7"
+APP_VERSION = "0.0.8"
 BUILD_ID = time.strftime("%Y%m%d-%H%M", time.localtime())
 
 

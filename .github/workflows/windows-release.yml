@@ -16,10 +16,10 @@ jobs:
         include:
           - os: windows-latest
             platform: Windows
-            executable: RobloxAutoFishing-v0.0.7.exe
+            executable: RobloxAutoFishing-v0.0.8.exe
           - os: ubuntu-latest
             platform: Linux
-            executable: RobloxAutoFishing-v0.0.7
+            executable: RobloxAutoFishing-v0.0.8
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -39,32 +39,32 @@ jobs:
         run: python -m unittest test_auto_fishing test_desktop_control tests.test_ui_redesign -v
       - name: Run tests
         if: runner.os == 'Linux'
-        run: xvfb-run -a python -m unittest test_auto_fishing test_desktop_control tests.test_ui_redesign -v
+        run: xvfb-run -a python -m unittest test_auto_fishing test_desktop_control tests.test_ui_redesign tests.test_auto_restart tests.test_track_robustness tests.test_gamescope_launch tests.test_gamescope_worker -v
       - name: Build executable
         if: runner.os == 'Windows'
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.7 --version-file windows-version-info.txt --exclude-module gamescope_worker --exclude-module gamescope_manager --exclude-module Xlib --exclude-module ui_linux ui_windows.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.8 --version-file windows-version-info.txt --exclude-module gamescope_worker --exclude-module gamescope_manager --exclude-module Xlib --exclude-module ui_linux ui_windows.py
       - name: Build executable
         if: runner.os == 'Linux'
-        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.7 ui_linux.py
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.8 ui_linux.py
       - name: Create Windows ZIP
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force release/RobloxAutoFishing-v0.0.7-Windows
-          Copy-Item dist/${{ matrix.executable }} release/RobloxAutoFishing-v0.0.7-Windows/
-          Copy-Item WINDOWS-README.txt release/RobloxAutoFishing-v0.0.7-Windows/
-          Compress-Archive -Force release/RobloxAutoFishing-v0.0.7-Windows/* release/RobloxAutoFishing-v0.0.7-Windows.zip
+          New-Item -ItemType Directory -Force release/RobloxAutoFishing-v0.0.8-Windows
+          Copy-Item dist/${{ matrix.executable }} release/RobloxAutoFishing-v0.0.8-Windows/
+          Copy-Item WINDOWS-README.txt release/RobloxAutoFishing-v0.0.8-Windows/
+          Compress-Archive -Force release/RobloxAutoFishing-v0.0.8-Windows/* release/RobloxAutoFishing-v0.0.8-Windows.zip
       - name: Create Linux ZIP
         if: runner.os == 'Linux'
         run: |
-          mkdir -p release/RobloxAutoFishing-v0.0.7-Linux
-          cp dist/${{ matrix.executable }} README.md release/RobloxAutoFishing-v0.0.7-Linux/
-          chmod +x release/RobloxAutoFishing-v0.0.7-Linux/${{ matrix.executable }}
-          cd release && zip -r RobloxAutoFishing-v0.0.7-Linux.zip RobloxAutoFishing-v0.0.7-Linux
+          mkdir -p release/RobloxAutoFishing-v0.0.8-Linux
+          cp dist/${{ matrix.executable }} README.md release/RobloxAutoFishing-v0.0.8-Linux/
+          chmod +x release/RobloxAutoFishing-v0.0.8-Linux/${{ matrix.executable }}
+          cd release && zip -r RobloxAutoFishing-v0.0.8-Linux.zip RobloxAutoFishing-v0.0.8-Linux
       - uses: actions/upload-artifact@v4
         with:
-          name: RobloxAutoFishing-v0.0.7-${{ matrix.platform }}
-          path: release/RobloxAutoFishing-v0.0.7-${{ matrix.platform }}.zip
+          name: RobloxAutoFishing-v0.0.8-${{ matrix.platform }}
+          path: release/RobloxAutoFishing-v0.0.8-${{ matrix.platform }}.zip
           if-no-files-found: error
 
   release:
@@ -74,10 +74,10 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          pattern: RobloxAutoFishing-v0.0.7-*
+          pattern: RobloxAutoFishing-v0.0.8-*
           merge-multiple: true
           path: release
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release/*.zip --repo "$GITHUB_REPOSITORY" --title "Roblox Auto Fishing 0.0.7" --notes "ตั้งแต่ v0.0.6 - เพิ่ม UI แยกตามระบบ รองรับ Windows โหมดปกติและโหมดสองจอทดลอง พร้อม SendInput, PostMessage, ระบบกู้คืน input และเครื่องมือวินิจฉัย; เพิ่ม Linux Gamescope + Sober แบบจอแยกและ worker ที่ควบคุมเฉพาะจอเกม; ปรับปรุงการติดตามแถบ การกู้คืนโฟกัส และการตรวจจับหน้าต่าง; แจกไฟล์ ZIP สำหรับ Windows และ Linux"
+        run: gh release create "$GITHUB_REF_NAME" release/*.zip --repo "$GITHUB_REPOSITORY" --title "Roblox Auto Fishing 0.0.8" --notes "ตั้งแต่ v0.0.7 - ปรับปรุงความทนทานของการติดตามเป้าหมาย รองรับการตั้งค่า Sober low graphics และเพิ่มการรีสตาร์ตรอบอัตโนมัติตามช่วงเวลาที่ตั้งค่าได้ (ค่าเริ่มต้น 30 วินาที); แจกไฟล์ ZIP สำหรับ Windows และ Linux"

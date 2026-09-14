@@ -1,6 +1,6 @@
 # โปรแกรมตกปลาอัตโนมัติ Roblox
 
-เวอร์ชันปัจจุบัน: **0.0.7**
+เวอร์ชันปัจจุบัน: **0.0.8**
 
 ดาวน์โหลดสำหรับ Windows และ Linux: [GitHub Releases](https://github.com/sekcy16/roblox-auto-fishing/releases/latest)
 
@@ -22,7 +22,7 @@
   - เมื่อเกมปิด จับภาพล้มเหลว หรือกด F8 ระบบจะปล่อยเมาส์และหยุดอย่างปลอดภัยทันที
 
 ### Windows
-- **ตัวเปิดใช้งาน:** `RobloxAutoFishing-v0.0.7.exe` (หรือ `python ui_windows.py`)
+- **ตัวเปิดใช้งาน:** `RobloxAutoFishing-v0.0.8.exe` (หรือ `python ui_windows.py`)
 - **โหมดปกติ (แนะนำ):** สั่งการเมาส์ด้วย Win32 `SendInput` มีระบบ retry และตรวจสอบสิทธิ์ Administrator (UIPI)
 - **เครื่องมือทดสอบและวินิจฉัย:** ปุ่มทดลองกดค้างพร้อมนับถอยหลัง 3 วินาที, ปุ่มคัดลอกผลวินิจฉัย, และการเปิดโฟลเดอร์บันทึก Log (`debug.log`)
 
@@ -77,10 +77,10 @@ python -m venv .venv
 คัดลอกโปรเจกต์ไปยังเครื่อง Windows ที่ติดตั้ง Python 3.12 แล้วดับเบิลคลิก `build-windows.bat` เมื่อการทดสอบและ Build ผ่าน ไฟล์พร้อมส่งจะอยู่ที่:
 
 ```text
-release\RobloxAutoFishing-v0.0.7-Windows.zip
+release\RobloxAutoFishing-v0.0.8-Windows.zip
 ```
 
-ผู้รับแตก ZIP แล้วเปิด `RobloxAutoFishing-v0.0.7.exe` ได้ทันทีโดยไม่ต้องติดตั้ง Python ค่าตั้งและภาพสัญญาณของผู้ใช้ Windows จะอยู่ใน `%LOCALAPPDATA%\RobloxAutoFishing`
+ผู้รับแตก ZIP แล้วเปิด `RobloxAutoFishing-v0.0.8.exe` ได้ทันทีโดยไม่ต้องติดตั้ง Python ค่าตั้งและภาพสัญญาณของผู้ใช้ Windows จะอยู่ใน `%LOCALAPPDATA%\RobloxAutoFishing`
 
 Windows ให้เลือกติดตั้ง Tcl/Tk ในตัวติดตั้ง Python ส่วน Linux ใช้แพ็กเกจ Tk ของดิสโทร รุ่นนี้ไม่รองรับ Wayland และกำหนดพื้นที่ได้เฉพาะจอหลัก
 

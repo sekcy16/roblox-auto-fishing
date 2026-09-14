@@ -1,4 +1,4 @@
-Roblox Auto Fishing — เวอร์ชัน 0.0.7 (Windows)
+Roblox Auto Fishing — เวอร์ชัน 0.0.8 (Windows)
 
 โหมดการทำงานบน Windows:
 - โหมดปกติ (จอเดียว - แนะนำ): ควบคุมเมาส์ผ่าน Win32 SendInput โดยตรง มีระบบ State Reconciliation คืนสถานะเมาส์และลองส่งใหม่อัตโนมัติ พร้อมระบบตรวจจับ UIPI สิทธิ์ Administrator
@@ -11,7 +11,7 @@ Roblox Auto Fishing — เวอร์ชัน 0.0.7 (Windows)
 
 วิธีเปิดใช้งาน
 1. แตกไฟล์ ZIP ก่อนใช้งาน
-2. ดับเบิลคลิก RobloxAutoFishing-v0.0.7.exe (หาก Roblox รันแบบสิทธิ์ Administrator ต้องรันโปรแกรมนี้ในฐานะ Run as Administrator ด้วยเช่นกัน)
+2. ดับเบิลคลิก RobloxAutoFishing-v0.0.8.exe (หาก Roblox รันแบบสิทธิ์ Administrator ต้องรันโปรแกรมนี้ในฐานะ Run as Administrator ด้วยเช่นกัน)
 3. เลือกหน้าต่าง Roblox และตั้งพื้นที่ตรวจจับตามลำดับในโปรแกรม
 4. กด F8 เพื่อเริ่มหรือหยุดการทำงานได้ทันที (ใช้ได้จากทุกหน้าต่าง)
 

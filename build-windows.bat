@@ -24,22 +24,22 @@ if errorlevel 1 (
 .venv-windows\Scripts\python.exe -m unittest test_auto_fishing test_desktop_control tests.test_ui_redesign tests.test_platform_dispatch tests.test_windows_normal_mode -v
 if errorlevel 1 goto :failed
 
-.venv-windows\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.7 --version-file windows-version-info.txt --exclude-module gamescope_worker --exclude-module gamescope_manager --exclude-module Xlib --exclude-module ui_linux ui_windows.py
+.venv-windows\Scripts\python.exe -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.8 --version-file windows-version-info.txt --exclude-module gamescope_worker --exclude-module gamescope_manager --exclude-module Xlib --exclude-module ui_linux ui_windows.py
 if errorlevel 1 goto :failed
 
-if exist "release\RobloxAutoFishing-v0.0.7" rmdir /s /q "release\RobloxAutoFishing-v0.0.7"
+if exist "release\RobloxAutoFishing-v0.0.8" rmdir /s /q "release\RobloxAutoFishing-v0.0.8"
 if errorlevel 1 goto :failed
-mkdir "release\RobloxAutoFishing-v0.0.7"
+mkdir "release\RobloxAutoFishing-v0.0.8"
 if errorlevel 1 goto :failed
-copy /y "dist\RobloxAutoFishing-v0.0.7.exe" "release\RobloxAutoFishing-v0.0.7\" >nul
+copy /y "dist\RobloxAutoFishing-v0.0.8.exe" "release\RobloxAutoFishing-v0.0.8\" >nul
 if errorlevel 1 goto :failed
-copy /y "WINDOWS-README.txt" "release\RobloxAutoFishing-v0.0.7\" >nul
+copy /y "WINDOWS-README.txt" "release\RobloxAutoFishing-v0.0.8\" >nul
 if errorlevel 1 goto :failed
-powershell -NoProfile -Command "Compress-Archive -Force -Path 'release\RobloxAutoFishing-v0.0.7\*' -DestinationPath 'release\RobloxAutoFishing-v0.0.7-Windows.zip'"
+powershell -NoProfile -Command "Compress-Archive -Force -Path 'release\RobloxAutoFishing-v0.0.8\*' -DestinationPath 'release\RobloxAutoFishing-v0.0.8-Windows.zip'"
 if errorlevel 1 goto :failed
 
 echo.
-echo Build complete: release\RobloxAutoFishing-v0.0.7-Windows.zip
+echo Build complete: release\RobloxAutoFishing-v0.0.8-Windows.zip
 pause
 exit /b 0
 

@@ -53,7 +53,8 @@ class VisionCheck(unittest.TestCase):
         frame[25:35, 20:300] = 0
         frame[20:40, 100:150] = (170, 100, 145)
         frame[22:38, 55:63] = 250
-        frame[22:38, 245:253] = 250
+        # Equal horizontal distance from the target makes this genuinely ambiguous.
+        frame[22:38, 188:196] = 250
         self.assertEqual(detect_bar(frame)[0], "ambiguous")
 
     def test_fifteen_pixel_marker_occlusion_keeps_one_target(self):
@@ -70,11 +71,12 @@ class VisionCheck(unittest.TestCase):
         frame = np.full((80, 320, 3), 90, dtype=np.uint8)
         frame[25:35, 20:300] = 0
         frame[20:40, 100:150] = (170, 100, 145)
-        frame[21:39, 240:248] = 250
-        frame[27:35, 55:62] = 250
+        # Equal horizontal distance; the right marker wins on vertical alignment.
+        frame[21:39, 188:196] = 250
+        frame[27:35, 55:63] = 250
         status, marker, target = detect_bar(frame)
         self.assertEqual(status, "valid")
-        self.assertTrue(240 <= marker <= 248)
+        self.assertTrue(188 <= marker <= 196)
         self.assertTrue(95 <= target[0] < target[1] <= 155)
 
 
@@ -102,8 +104,10 @@ class ControlCheck(unittest.TestCase):
         self.assertEqual(c.step(2.1, {"bar": valid, "bite": False}, True), "none")
         self.assertEqual(c.step(2.2, {"bar": valid, "bite": False}, True), "none")
         self.assertEqual(c.state, "Track")
-        # Missing bar releases and enters End
+        # Missing bar releases but stays in Track during the grace window.
         self.assertEqual(c.step(2.3, {"bar": ("absent", None, None), "bite": False}, True), "release")
+        self.assertEqual(c.state, "Track")
+        self.assertEqual(c.step(2.56, {"bar": ("absent", None, None), "bite": False}, True), "none")
         self.assertEqual(c.state, "End")
 
     def test_focus_loss_pauses_and_releases(self):
@@ -125,10 +129,10 @@ class ControlCheck(unittest.TestCase):
         for t in (0.2, 0.3, 0.4):
             c.step(t, {"bar": valid, "bite": False}, True)
         self.assertEqual(c.state, "Track")
-        # Bar lost -> enters End
+        # Bar lost -> releases while Track grace is active
         c.step(0.5, {"bar": ("absent", None, None), "bite": False}, True)
-        self.assertEqual(c.state, "End")
-        # Absent for 1.0s (0.5 + 1.0 = 1.5) -> recasts
+        self.assertEqual(c.state, "Track")
+        # Grace expires, entering End; total absence reaches one second at 1.5s.
         self.assertEqual(c.step(1.4, {"bar": ("absent", None, None), "bite": False}, True), "none")
         self.assertEqual(c.state, "End")
         self.assertEqual(c.step(1.5, {"bar": ("absent", None, None), "bite": False}, True), "hold")
@@ -144,14 +148,14 @@ class ControlCheck(unittest.TestCase):
         c.step(2.0, {"bar": valid, "bite": False}, True)
         self.assertEqual(c.state, "Track")
         c.step(2.3, {"bar": ("absent", None, None), "bite": False}, True)
-        self.assertEqual(c.state, "End")
+        self.assertEqual(c.state, "Track")
         # When bar reappears, immediately enters Track
         c.step(2.8, {"bar": valid, "bite": False}, True)
         self.assertEqual(c.state, "Track")
-        # Bar lost again -> enters End at 3.0
+        # Bar lost again -> remains in Track during grace
         c.step(3.0, {"bar": ("absent", None, None), "bite": False}, True)
-        self.assertEqual(c.state, "End")
-        # Not yet 1.0s continuous absence (0.5s elapsed)
+        self.assertEqual(c.state, "Track")
+        # Grace expires and enters End
         c.step(3.5, {"bar": ("absent", None, None), "bite": False}, True)
         self.assertEqual(c.state, "End")
         # 1.0s continuous absence elapsed (3.0 to 4.0) -> recasts
@@ -182,7 +186,7 @@ class SettingsCheck(unittest.TestCase):
     def test_windows_user_data_uses_local_appdata(self):
         path = user_data_dir("Windows", {"LOCALAPPDATA": r"C:\Users\Friend\AppData\Local"})
         self.assertEqual(path, Path(r"C:\Users\Friend\AppData\Local") / "RobloxAutoFishing")
-        self.assertEqual(APP_VERSION, "0.0.7")
+        self.assertEqual(APP_VERSION, "0.0.8")
 
     def test_rejects_invalid_numeric_and_roi_settings(self):
         base = {"cast_seconds": 1.0, "lead": 0.08, "margin": 3.0,
@@ -314,20 +318,24 @@ class FishingModeTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate_settings({**base, "fishing_mode": invalid}, (0, 0, 800, 600))
 
-    # 3. Controller ในสถานะ Wait ต้องรอต่อไปเรื่อย ๆ โดยไม่ timeout และไม่เหวี่ยงเบ็ดซ้ำ แม้เวลาจะผ่านไปนานเท่าใด
-    def test_3_wait_indefinitely_without_timeout_or_recast(self):
+    # 3. Wait stays passive before timeout, then bounded recovery recasts safely.
+    def test_3_wait_timeout_recasts_after_passive_period(self):
         for mode in ("rod", "net"):
             c = Controller({"fishing_mode": mode, "cast_seconds": 0.5, "lead": 0.05,
-                            "margin": 3.0, "right_on_hold": False, "bite_ack": True})
+                            "margin": 3.0, "right_on_hold": False, "bite_ack": True,
+                            "wait_timeout": 5.0, "max_retries": 1})
             c.start(0.0)
             self.assertEqual(c.step(0.0, {"bar": ("absent", None, None), "bite": False}, True), "hold")
             self.assertEqual(c.step(0.5, {"bar": ("absent", None, None), "bite": False}, True), "release")
             self.assertEqual(c.state, "Wait")
-            # Wait across different time points (30s, 60s, 300s, 1000s) without timeout or recast
-            for t in (1.0, 30.0, 60.0, 120.0, 300.0, 1000.0):
+            # Before timeout, remain passive and do not recast.
+            for t in (1.0, 3.0, 5.4):
                 action = c.step(t, {"bar": ("absent", None, None), "bite": False}, True)
                 self.assertEqual(action, "none")
                 self.assertEqual(c.state, "Wait")
+            # Confirmed absence after timeout triggers one bounded recast.
+            self.assertEqual(c.step(5.5, {"bar": ("absent", None, None), "bite": False}, True), "hold")
+            self.assertEqual(c.state, "Cast")
 
     # 4. Controller ตรวจพบสัญญาณปลากินเบ็ด 1 หรือ 2 เฟรมต่อเนื่อง ต้องยังไม่คลิก
     def test_4_bite_signal_under_three_frames_does_not_click(self):
@@ -409,7 +417,8 @@ class FishingModeTests(unittest.TestCase):
     # 8. Controller เมื่อพบหลอดมินิเกมครบตามเงื่อนไข ต้องเข้าสู่สถานะ Track ทันที ไม่ว่าจะรอมานานเท่าใด
     def test_8_bar_found_enters_track_regardless_of_time(self):
         c = Controller({"cast_seconds": 0.5, "lead": 0.0, "margin": 3.0,
-                        "right_on_hold": False, "bite_ack": True})
+                        "right_on_hold": False, "bite_ack": True,
+                        "wait_timeout": 600.0})
         c.start(0.0)
         c.step(0.0, {"bar": ("absent", None, None), "bite": False}, True)
         c.step(0.5, {"bar": ("absent", None, None), "bite": False}, True)
@@ -596,12 +605,12 @@ class BarResponsivenessAndNetFixtureTests(unittest.TestCase):
             valid = ("valid", 70.0, (25.0, 56.0))
             self.assertEqual(c.step(1.0, {"bar": valid, "bite": False}, True), "hold")
             self.assertEqual(c.state, "Track")
-            # Bar disappears -> transitions to End and releases
+            # Bar disappears -> releases while Track grace is active
             action_lost = c.step(1.1, {"bar": ("absent", None, None), "bite": False}, True)
-            self.assertEqual(c.state, "End")
+            self.assertEqual(c.state, "Track")
             self.assertEqual(action_lost, "release")
             self.assertFalse(c.held)
-            # Reappears in End -> immediately re-enters Track and responds with hold
+            # Reappears within grace -> continues Track and responds with hold
             action_recover = c.step(1.2, {"bar": valid, "bite": False}, True)
             self.assertEqual(c.state, "Track")
             self.assertEqual(action_recover, "hold")
@@ -636,7 +645,7 @@ class BarResponsivenessAndNetFixtureTests(unittest.TestCase):
         action = c.step(1.1, {"bar": ("absent", None, None), "bite": False}, True)
         self.assertEqual(action, "release")
         self.assertFalse(c.held)
-        self.assertEqual(c.state, "End")
+        self.assertEqual(c.state, "Track")
 
     def test_net_mode_ignores_bite_and_never_clicks_in_wait(self):
         """โหมดแหต้องไม่คลิกเมื่อได้รับสัญญาณ bite ในสถานะ Wait และรอจนกว่ามินิเกมจะปรากฏ"""
