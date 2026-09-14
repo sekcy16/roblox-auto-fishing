@@ -19,6 +19,9 @@ import unittest
 from unittest import mock
 import tkinter as tk
 
+if not hasattr(ctypes, "windll"):
+    ctypes.windll = mock.MagicMock()
+
 import auto_fishing
 from auto_fishing import (
     ActionResult,

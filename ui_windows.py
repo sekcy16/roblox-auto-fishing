@@ -565,6 +565,10 @@ class WindowsFishingApp(BaseFishingApp):
         self.env_mode = env
         self.vars["env_mode"] = self.tk.StringVar(value=env)
         self.vars["dev_mode"] = self.tk.BooleanVar(value=self.dev_mode)
+        if "auto_restart_30s" in win_cfg:
+            self.vars["auto_restart_30s"].set(bool(win_cfg["auto_restart_30s"]))
+        if "auto_restart_interval" in win_cfg:
+            self.vars["auto_restart_interval"].set(str(win_cfg["auto_restart_interval"]))
 
     def _build_mode_panel(self, outer: tk.Frame) -> None:
         """Render mode selection: Normal Desktop (default) vs Dev-gated Dual-Screen."""
@@ -1308,6 +1312,7 @@ class WindowsFishingApp(BaseFishingApp):
             self.fps_count = 0
             self.fps_started = time.monotonic()
             self._set_status(f"กำลังทำงานในโหมดสองจอ — {mode_name} — ใช้งานจอ 1 ได้ตามปกติ")
+            self._schedule_auto_restart()
             self.root.after(20, self._pump_dual_screen)
         except Exception as exc:
             self.stop(f"เริ่มไม่ได้: {exc}")
@@ -1596,7 +1601,8 @@ class WindowsFishingApp(BaseFishingApp):
         self.mouse_held = False
         super().stop(reason)
         if getattr(self, "env_mode", "desktop") == "dual_screen" and hasattr(self, "main_action_btn"):
-            self.main_action_btn.configure(text="▶  เริ่ม Auto สองจอ (F8)", style="Primary.TButton")
+            if reason != "auto_restart_cycle":
+                self.main_action_btn.configure(text="▶  เริ่ม Auto สองจอ (F8)", style="Primary.TButton")
 
     def _save_roi_selection(
         self, name: str, area: list[int], bounds: tuple[int, int, int, int], image: Any
@@ -1618,6 +1624,10 @@ class WindowsFishingApp(BaseFishingApp):
         self.settings["windows"]["env_mode"] = self.env_mode
         if "rois" in settings:
             self.settings["windows"]["rois"] = dict(settings["rois"])
+        if "auto_restart_30s" in settings:
+            self.settings["windows"]["auto_restart_30s"] = bool(settings["auto_restart_30s"])
+        if "auto_restart_interval" in settings:
+            self.settings["windows"]["auto_restart_interval"] = int(settings["auto_restart_interval"])
         save_settings(self.settings)
         return settings
 

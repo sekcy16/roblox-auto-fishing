@@ -35,7 +35,6 @@ exec gamescope \
     --framerate-limit "$REFRESH" \
     --display-index "$DISPLAY_INDEX" \
     --force-grab-cursor \
-    --immediate-flips \
     $FS_FLAG \
     -- \
     flatpak run \

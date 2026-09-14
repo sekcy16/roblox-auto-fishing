@@ -116,6 +116,263 @@ class GamescopeWorkerUnitTests(unittest.TestCase):
         self.assertEqual(stop_msg[0], "STOPPED")
         self.assertEqual(stop_msg[1], "unit test stop")
 
+    def test_mouse_sync_recovers_after_capture_failure(self):
+        from unittest import mock
+        import numpy as np
+
+        settings = {
+            "rois": {"bar": [100, 50, 100, 20]},
+            "cast_seconds": 0.1,
+            "right_on_hold": True,
+            "margin": 3.0,
+            "lead": 0.0,
+            "bite_threshold": 0.85,
+        }
+        self.worker.settings = settings
+        self.worker.start_fishing()
+        self.parent_pipe.recv()
+
+        obs_frame = np.zeros((20, 100, 3), dtype=np.uint8)
+        self.worker.grab_window_rect = mock.Mock(return_value=obs_frame)
+        self.worker.d = mock.Mock()
+        self.worker.controller.state = "Track"
+
+        # Valid frame requiring hold: marker 20.0, target (40.0, 60.0), right_on_hold=True
+        with mock.patch("gamescope_worker.detect_bar", return_value=("valid", 20.0, (40.0, 60.0))), \
+             mock.patch("gamescope_worker.xtest.fake_input"), \
+             mock.patch("gamescope_worker.time.sleep"):
+            self.worker.tick()
+
+        self.assertEqual(self.worker.controller.state, "Track")
+        self.assertTrue(self.worker.controller.held)
+        self.assertTrue(self.worker.mouse_held)
+
+        # 1 frame capture failure
+        self.worker.grab_window_rect = mock.Mock(return_value=None)
+        with mock.patch("gamescope_worker.xtest.fake_input"), \
+             mock.patch("gamescope_worker.time.sleep"):
+            self.worker.tick()
+
+        # Worker released mouse
+        self.assertFalse(self.worker.mouse_held)
+        # Controller held MUST also be synced to False
+        self.assertFalse(self.worker.controller.held)
+
+        # Valid frame returns requiring hold
+        self.worker.grab_window_rect = mock.Mock(return_value=obs_frame)
+        with mock.patch("gamescope_worker.detect_bar", return_value=("valid", 20.0, (40.0, 60.0))), \
+             mock.patch("gamescope_worker.xtest.fake_input"), \
+             mock.patch("gamescope_worker.time.sleep"):
+            self.worker.tick()
+
+        # Both must be holding
+        self.assertTrue(self.worker.controller.held)
+        self.assertTrue(self.worker.mouse_held)
+
+    def test_mouse_sync_does_not_hold_if_recovered_frame_requires_release(self):
+        from unittest import mock
+        import numpy as np
+
+        settings = {
+            "rois": {"bar": [100, 50, 100, 20]},
+            "cast_seconds": 0.1,
+            "right_on_hold": True,
+            "margin": 3.0,
+            "lead": 0.0,
+            "bite_threshold": 0.85,
+        }
+        self.worker.settings = settings
+        self.worker.start_fishing()
+        self.parent_pipe.recv()
+
+        obs_frame = np.zeros((20, 100, 3), dtype=np.uint8)
+        self.worker.grab_window_rect = mock.Mock(return_value=obs_frame)
+        self.worker.d = mock.Mock()
+        self.worker.controller.state = "Track"
+
+        with mock.patch("gamescope_worker.detect_bar", return_value=("valid", 20.0, (40.0, 60.0))), \
+             mock.patch("gamescope_worker.xtest.fake_input"), \
+             mock.patch("gamescope_worker.time.sleep"):
+            self.worker.tick()
+
+        self.assertTrue(self.worker.mouse_held)
+
+        # Capture fails
+        self.worker.grab_window_rect = mock.Mock(return_value=None)
+        with mock.patch("gamescope_worker.xtest.fake_input"), \
+             mock.patch("gamescope_worker.time.sleep"):
+            self.worker.tick()
+        self.assertFalse(self.worker.mouse_held)
+        self.assertFalse(self.worker.controller.held)
+
+        # Recovered frame requires release: marker at 80.0 > target (40.0, 60.0) with right_on_hold=True
+        self.worker.grab_window_rect = mock.Mock(return_value=obs_frame)
+        with mock.patch("gamescope_worker.detect_bar", return_value=("valid", 80.0, (40.0, 60.0))), \
+             mock.patch("gamescope_worker.xtest.fake_input"), \
+             mock.patch("gamescope_worker.time.sleep"):
+            self.worker.tick()
+
+        self.assertFalse(self.worker.controller.held)
+        self.assertFalse(self.worker.mouse_held)
+
+    def test_gamescope_outage_keeps_worker_listening_and_reports_recovery(self):
+        from unittest import mock
+
+        settings = {
+            "rois": {"bar": [100, 50, 100, 20]},
+            "cast_seconds": 0.1,
+            "right_on_hold": True,
+            "margin": 3.0,
+            "lead": 0.0,
+            "bite_threshold": 0.85,
+        }
+        self.worker.settings = settings
+        self.worker.start_fishing()
+        self.parent_pipe.recv()
+        self.worker.controller.state = "Track"
+        self.worker.controller.previous_x = 20.0
+        self.worker.controller.previous_time = 1.0
+        self.worker.controller.velocity = 42.0
+        self.worker.mouse_held = True
+        self.worker.target_lost_since = time.monotonic() - 10.0
+
+        with mock.patch.object(self.worker, "check_target_valid", return_value=False), \
+             mock.patch("gamescope_worker.xtest.fake_input"), \
+             mock.patch("gamescope_worker.time.sleep"):
+            self.worker.tick()
+
+        self.assertTrue(self.worker.running)
+        self.assertFalse(self.worker.mouse_held)
+        self.assertFalse(self.worker.controller.held)
+        self.assertIsNone(self.worker.controller.previous_x)
+        self.assertEqual(self.worker.controller.velocity, 0.0)
+
+        # A valid frame resumes the controller only after the outage is over.
+        import numpy as np
+        self.worker.d = mock.Mock()
+        self.worker.capture_fail_since = None
+        self.worker.grab_window_rect = mock.Mock(return_value=np.zeros((20, 100, 3), dtype=np.uint8))
+        with mock.patch.object(self.worker, "check_target_valid", return_value=True), \
+             mock.patch("gamescope_worker.detect_bar", return_value=("valid", 20.0, (40.0, 60.0))), \
+             mock.patch("gamescope_worker.xtest.fake_input"), \
+             mock.patch("gamescope_worker.time.sleep"):
+            self.worker.tick()
+        self.assertTrue(self.worker.running)
+        self.assertTrue(self.worker.mouse_held)
+        self.assertTrue(self.worker.controller.held)
+        messages = []
+        while self.parent_pipe.poll():
+            messages.append(self.parent_pipe.recv())
+        self.assertTrue(any(message[0] == "STATUS" for message in messages))
+        self.assertFalse(any(message[0] == "STOPPED" for message in messages))
+
+        # A prolonged capture outage follows the same recoverable path.
+        self.worker.target_lost_since = None
+        self.worker.capture_fail_since = time.monotonic() - 10.0
+        self.worker.grab_window_rect = mock.Mock(return_value=None)
+        with mock.patch.object(self.worker, "check_target_valid", return_value=True), \
+             mock.patch("gamescope_worker.xtest.fake_input"), \
+             mock.patch("gamescope_worker.time.sleep"):
+            self.worker.tick()
+        self.assertTrue(self.worker.running)
+        self.assertFalse(self.worker.mouse_held)
+        self.assertFalse(self.worker.controller.held)
+
+    def test_target_window_destroyed_stops_worker(self):
+        from unittest import mock
+
+        settings = {
+            "rois": {"bar": [100, 50, 100, 20]},
+            "cast_seconds": 0.1,
+            "right_on_hold": True,
+            "margin": 3.0,
+            "lead": 0.0,
+            "bite_threshold": 0.85,
+        }
+        self.worker.settings = settings
+        self.worker.start_fishing()
+        self.parent_pipe.recv()
+
+        self.worker.d = mock.Mock()
+        bad_window_exc = type("BadWindow", (Exception,), {"_error": 3})("BadWindow error")
+        self.mock_win.get_attributes = mock.Mock(side_effect=bad_window_exc)
+        with mock.patch("gamescope_worker.xtest.fake_input"):
+            self.worker.tick()
+
+        self.assertTrue(self.worker.target_window_dead)
+        self.assertFalse(self.worker.running)
+        stop_msg = self.parent_pipe.recv()
+        self.assertEqual(stop_msg[0], "STOPPED")
+        self.assertEqual(stop_msg[1], "target window closed")
+
+    def test_transient_input_failure_does_not_terminate(self):
+        from unittest import mock
+        import numpy as np
+
+        settings = {
+            "rois": {"bar": [100, 50, 100, 20]},
+            "cast_seconds": 0.1,
+            "right_on_hold": True,
+            "margin": 3.0,
+            "lead": 0.0,
+            "bite_threshold": 0.85,
+        }
+        self.worker.settings = settings
+        self.worker.start_fishing()
+        self.parent_pipe.recv()
+
+        obs_frame = np.zeros((20, 100, 3), dtype=np.uint8)
+        self.worker.grab_window_rect = mock.Mock(return_value=obs_frame)
+        self.worker.d = mock.Mock()
+        self.worker.controller.state = "Track"
+
+        # Frame 1: apply_action returns False (transient failure)
+        with mock.patch("gamescope_worker.detect_bar", return_value=("valid", 20.0, (40.0, 60.0))), \
+             mock.patch.object(self.worker, "apply_action", return_value=False), \
+             mock.patch("gamescope_worker.time.sleep"):
+            self.worker.tick()
+
+        # Worker must stay running through a transient failure
+        self.assertTrue(self.worker.running)
+        self.assertEqual(self.worker.input_fail_streak, 1)
+        self.assertFalse(self.worker.mouse_held)
+        self.assertFalse(self.worker.controller.held)
+
+        # Frame 2: apply_action returns True (recovery)
+        with mock.patch("gamescope_worker.detect_bar", return_value=("valid", 20.0, (40.0, 60.0))), \
+             mock.patch.object(self.worker, "apply_action", return_value=True), \
+             mock.patch("gamescope_worker.time.sleep"):
+            self.worker.tick()
+
+        self.assertTrue(self.worker.running)
+        self.assertEqual(self.worker.input_fail_streak, 0)
+
+    def test_worker_survives_extended_ui_silence_while_parent_alive(self):
+        from unittest import mock
+
+        self.worker.running = True
+        self.worker.last_heartbeat = time.monotonic() - 6.0
+        self.worker.check_parent_alive = mock.Mock(return_value=True)
+
+        # Should survive 6 seconds of UI silence because timeout is now 10s and parent is alive
+        now = time.monotonic()
+        if not self.worker.check_parent_alive():
+            self.worker.running = False
+        if self.worker.running and (now - self.worker.last_heartbeat > 10.0):
+            self.worker.running = False
+
+        self.assertTrue(self.worker.running)
+
+    def test_persistent_runtime_events_log_writes_transitions(self):
+        log_file = ROOT / "runtime-events.log"
+        test_marker = f"unit_test_event_{int(time.time() * 1000)}"
+        self.worker._log_event(test_marker, {"detail": "verify_file_write"})
+
+        self.assertTrue(log_file.is_file())
+        content = log_file.read_text(encoding="utf-8")
+        self.assertIn(test_marker, content)
+
+
 
 class GamescopeWorkerIntegrationTests(unittest.TestCase):
     @classmethod

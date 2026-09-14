@@ -181,7 +181,9 @@ def launch_sober_in_gamescope(
     height: int = 720,
     fullscreen: bool = False,
     refresh_rate: int | None = None,
-    timeout: float = 10.0,
+    prefer_vk_device: str | None = None,
+    immediate_flips: bool = False,
+    timeout: float = 30.0,
     poll_interval: float = 0.25,
 ) -> tuple[subprocess.Popen[Any], str | None]:
     """Launch Flatpak Sober wrapped inside Gamescope.
@@ -197,6 +199,8 @@ def launch_sober_in_gamescope(
         height=height,
         fullscreen=fullscreen,
         refresh_rate=refresh_rate,
+        prefer_vk_device=prefer_vk_device,
+        immediate_flips=immediate_flips,
     )
 
     try:
@@ -242,6 +246,8 @@ def build_gamescope_command(
     height: int = 720,
     fullscreen: bool = False,
     refresh_rate: int | None = None,
+    prefer_vk_device: str | None = None,
+    immediate_flips: bool = False,
 ) -> list[str]:
     """Build the Gamescope command with matching nested output timing."""
     if refresh_rate is None:
@@ -255,8 +261,11 @@ def build_gamescope_command(
         "--framerate-limit", str(refresh_rate),
         "--display-index", str(display_index),
         "--force-grab-cursor",
-        "--immediate-flips",
     ]
+    if immediate_flips:
+        cmd.append("--immediate-flips")
+    if prefer_vk_device:
+        cmd.extend(["--prefer-vk-device", prefer_vk_device])
     if fullscreen:
         cmd.append("-f")
 

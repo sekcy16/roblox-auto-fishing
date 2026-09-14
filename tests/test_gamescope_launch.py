@@ -19,6 +19,23 @@ from ui_linux import configure_sober_low_graphics
 
 
 class LaunchManagerTests(unittest.TestCase):
+    def test_command_omits_immediate_flips_by_default(self):
+        command = gm.build_gamescope_command()
+        self.assertNotIn("--immediate-flips", command)
+
+    def test_command_includes_immediate_flips_when_opted_in(self):
+        command = gm.build_gamescope_command(immediate_flips=True)
+        self.assertIn("--immediate-flips", command)
+
+    def test_command_prefers_configured_vulkan_device(self):
+        command = gm.build_gamescope_command(
+            refresh_rate=144,
+            fullscreen=False,
+            prefer_vk_device="10de:28a1",
+        )
+        index = command.index("--prefer-vk-device")
+        self.assertEqual(command[index + 1], "10de:28a1")
+
     def test_command_keeps_gamescope_gpu_auto_selected(self):
         with mock.patch.object(gm.Path, "exists", return_value=True):
             command = gm.build_gamescope_command(refresh_rate=60, fullscreen=False)
@@ -202,11 +219,29 @@ class LaunchUiTests(unittest.TestCase):
         app._set_status = mock.Mock()
         app._update_readiness = mock.Mock()
         process = mock.Mock()
+        process.poll.return_value = 1
         with mock.patch.object(gm, "stop_process_safely") as stop:
             app._finish_gamescope_launch(process, None, "ไม่พบจอ Gamescopeภายใน timeout")
         stop.assert_called_once_with(process)
         self.assertIsNone(app.spawned_gamescope_proc)
         self.assertIn("timeout", app._set_status.call_args.args[0])
+
+    def test_timeout_retains_running_process_and_diagnostics(self):
+        app = object.__new__(FishingApp)
+        app._closing = False
+        app.gamescope_launch_pending = True
+        app._set_gamescope_launch_button = mock.Mock()
+        app.gamescope_status_badge = mock.Mock()
+        app._set_status = mock.Mock()
+        app._update_readiness = mock.Mock()
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.pid = 99999
+        with mock.patch.object(gm, "stop_process_safely") as stop:
+            app._finish_gamescope_launch(process, None, "ไม่พบ display Gamescope ภายใน 30 วินาที แต่ process ยังทำงานอยู่ (PID 99999)")
+        stop.assert_not_called()
+        self.assertIs(app.spawned_gamescope_proc, process)
+        self.assertIn("99999", app._set_status.call_args.args[0])
 
     def test_status_poll_does_not_replace_launch_error(self):
         app = object.__new__(FishingApp)
@@ -221,6 +256,44 @@ class LaunchUiTests(unittest.TestCase):
         app._poll_gamescope_status()
         app._refresh_gamescope_status.assert_not_called()
         app._update_readiness.assert_called_once()
+
+    def test_read_ui_retains_gamescope_vk_device_override(self):
+        app = object.__new__(FishingApp)
+        app.settings = {
+            "fishing_mode": "rod",
+            "cast_seconds": 2.0,
+            "margin": 3.0,
+            "lead": 0.0,
+            "bite_threshold": 0.85,
+            "right_on_hold": False,
+            "bite_ack": True,
+            "debug": False,
+            "auto_restart_30s": True,
+            "auto_restart_interval": 30,
+            "gamescope_vk_device_override": "10de:28a1",
+            "gamescope_rois": {"bar": [10, 10, 100, 20]},
+            "linux": {
+                "gamescope_vk_device_override": "10de:28a1",
+            },
+        }
+        app.env_mode = "gamescope"
+        app.vars = {
+            "fishing_mode": mock.Mock(get=lambda: "rod"),
+            "cast_seconds": mock.Mock(get=lambda: "2.0"),
+            "margin": mock.Mock(get=lambda: "3.0"),
+            "lead": mock.Mock(get=lambda: "0.0"),
+            "threshold": mock.Mock(get=lambda: "0.85"),
+            "right": mock.Mock(get=lambda: False),
+            "ack": mock.Mock(get=lambda: True),
+            "debug": mock.Mock(get=lambda: False),
+            "auto_restart_30s": mock.Mock(get=lambda: True),
+            "auto_restart_interval": mock.Mock(get=lambda: "30"),
+            "gamescope_fps": mock.Mock(get=lambda: "144"),
+            "gamescope_res": mock.Mock(get=lambda: "960x540"),
+            "gamescope_fullscreen": mock.Mock(get=lambda: False),
+        }
+        ui_data = app._read_ui()
+        self.assertEqual(ui_data.get("gamescope_vk_device_override"), "10de:28a1")
 
 
 class ShellLauncherTests(unittest.TestCase):

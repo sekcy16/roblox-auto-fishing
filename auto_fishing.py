@@ -106,9 +106,13 @@ DEFAULT_SETTINGS = {
     "bite_ack": True,
     "debug": False,
     "auto_refocus": False,
+    "auto_restart_30s": True,
+    "auto_restart_interval": 30,
     # Platform-specific isolated namespaces
     "windows": {
         "rois": {"bar": None, "bite": None},
+        "auto_restart_30s": True,
+        "auto_restart_interval": 30,
     },
     "linux": {
         "env_mode": "desktop",
@@ -117,12 +121,16 @@ DEFAULT_SETTINGS = {
         "gamescope_fps": 60,
         "gamescope_res": "1280x720",
         "gamescope_fullscreen": False,
+        "auto_restart_30s": True,
+        "auto_restart_interval": 30,
+        "gamescope_vk_device_override": None,
     },
     # Backwards compatibility mirrors
     "env_mode": "desktop",
     "gamescope_fps": 60,
     "gamescope_res": "1280x720",
     "gamescope_fullscreen": False,
+    "gamescope_vk_device_override": None,
     "rois": {"bar": None, "bite": None},
     "gamescope_rois": {"bar": None, "bite": None},
 }
@@ -171,9 +179,36 @@ def validate_settings(data: dict[str, Any], screen_bounds: tuple[int, int, int, 
         if not _finite(value) or float(value) < low or (high is not None and float(value) > high):
             raise ValueError(f"ค่า {key} อยู่นอกช่วงที่กำหนด")
         result[key] = float(value)
-    for key in ("right_on_hold", "bite_ack", "debug", "auto_refocus"):
+    for key in ("right_on_hold", "bite_ack", "debug", "auto_refocus", "auto_restart_30s"):
         if key in result and not isinstance(result.get(key), bool):
             raise ValueError(f"ค่า {key} ต้องเป็น true หรือ false")
+    result["auto_restart_30s"] = bool(result.get("auto_restart_30s", True))
+    try:
+        interval = int(result.get("auto_restart_interval", 30))
+        result["auto_restart_interval"] = interval if 5 <= interval <= 600 else 30
+    except (ValueError, TypeError):
+        result["auto_restart_interval"] = 30
+    if "windows" in result and isinstance(result["windows"], dict):
+        result["windows"]["auto_restart_30s"] = bool(result["windows"].get("auto_restart_30s", result["auto_restart_30s"]))
+        try:
+            win_interval = int(result["windows"].get("auto_restart_interval", result["auto_restart_interval"]))
+            result["windows"]["auto_restart_interval"] = win_interval if 5 <= win_interval <= 600 else 30
+        except (ValueError, TypeError):
+            result["windows"]["auto_restart_interval"] = 30
+    if "linux" in result and isinstance(result["linux"], dict):
+        result["linux"]["auto_restart_30s"] = bool(result["linux"].get("auto_restart_30s", result["auto_restart_30s"]))
+        try:
+            lin_interval = int(result["linux"].get("auto_restart_interval", result["auto_restart_interval"]))
+            result["linux"]["auto_restart_interval"] = lin_interval if 5 <= lin_interval <= 600 else 30
+        except (ValueError, TypeError):
+            result["linux"]["auto_restart_interval"] = 30
+    vk_override = data.get("gamescope_vk_device_override")
+    if not vk_override and isinstance(data.get("linux"), dict):
+        vk_override = data["linux"].get("gamescope_vk_device_override")
+    if vk_override:
+        result["gamescope_vk_device_override"] = str(vk_override).strip()
+        if "linux" in result and isinstance(result["linux"], dict):
+            result["linux"]["gamescope_vk_device_override"] = str(vk_override).strip()
     rois = dict(DEFAULT_SETTINGS["rois"])
     rois.update(data.get("rois") or {})
     if rois.get("bar") is None:
@@ -213,8 +248,8 @@ def detect_bar(bgr: Any) -> tuple[str, float | None, tuple[float, float] | None]
         return [tuple(map(int, row)) for row in stats[1:]]
 
     markers = [(x, y, w, h) for x, y, w, h, area in components(white)
-               if 4 <= h <= 80 and 2 <= w <= max(14, int(h * 1.8))
-               and area >= min(5, w * h * 0.35)]
+               if 3 <= h <= 80 and 2 <= w <= max(14, int(h * 1.8))
+               and area >= min(4, w * h * 0.30)]
 
     raw_targets = [(x, y, w, h) for x, y, w, h, area in components(purple)
                    if 3 <= h <= 64 and w >= 2
@@ -225,7 +260,12 @@ def detect_bar(bgr: Any) -> tuple[str, float | None, tuple[float, float] | None]
     def aligned(a, b):
         _, y, _, h = a
         _, other_y, _, other_h = b
-        return (0.35 <= h / max(1, other_h) <= 2.8
+        clipped = (y == 0 or other_y == 0 or (y + h >= image.shape[0]) or (other_y + other_h >= image.shape[0]))
+        h_ratio = h / max(1, other_h)
+        if clipped:
+            vert_overlap = min(y + h, other_y + other_h) - max(y, other_y)
+            return (0.15 <= h_ratio <= 6.0 and (vert_overlap >= -2 or abs(y + h / 2.0 - other_y - other_h / 2.0) <= max(6.0, min(h, other_h) * 0.65)))
+        return (0.35 <= h_ratio <= 2.8
                 and abs(y + h / 2.0 - other_y - other_h / 2.0) <= max(3.5, min(h, other_h) * 0.45))
 
     raw_targets.sort()
@@ -343,8 +383,18 @@ class Controller:
         self.cast_started = self.wait_started = self.absent_started = None
         self.valid_streak = self.bite_streak = self.bite_clear_streak = 0
         self.bite_latched = False
+        mode = self.settings.get("fishing_mode", "rod")
+        default_wait_timeout = 60.0 if mode == "net" else 45.0
+        self.wait_timeout = float(wait_timeout) if wait_timeout is not None else float(self.settings.get("wait_timeout", default_wait_timeout))
+        self.track_timeout = float(track_timeout) if track_timeout is not None else None
+        self.max_retries = int(self.settings.get("max_retries", 3))
         self.retry_count = 0
+        self.continuous_recovery = bool(self.settings.get("continuous_recovery", False))
+        self.absent_timeout = float(self.settings.get("absent_timeout", 0.25))
         self.ambiguous_streak = 0
+        self.ambiguous_started: float | None = None
+        self.ambiguous_resume_frames = 0
+        self.ambiguous_timeout = float(self.settings.get("ambiguous_timeout", 3.0))
         self.previous_x = self.previous_time = None
         self.velocity = 0.0
         configured_lead = float(self.settings.get("lead", 0.0))
@@ -378,6 +428,9 @@ class Controller:
         self.wait_started = self.absent_started = None
         self.valid_streak = self.bite_streak = self.bite_clear_streak = 0
         self.ambiguous_streak = 0
+        self.ambiguous_started = None
+        self.ambiguous_resume_frames = 0
+        self.retry_count = 0
         self.bite_latched = False
         self.held = False
         self.desired_held = True
@@ -402,6 +455,9 @@ class Controller:
         self.pre_focus_state = None
         self.resume_stable_frames = 0
         self.focus_lost_since = None
+        self.ambiguous_streak = 0
+        self.ambiguous_started = None
+        self.ambiguous_resume_frames = 0
         return action
 
     def _pause(self, reason: str) -> str:
@@ -410,6 +466,9 @@ class Controller:
         self.held = False
         self.actual_held = False
         self.state, self.reason = "Paused", reason
+        self.ambiguous_streak = 0
+        self.ambiguous_started = None
+        self.ambiguous_resume_frames = 0
         return action
 
     def _enter_cast(self, now: float) -> str:
@@ -417,6 +476,8 @@ class Controller:
         self.wait_started = self.absent_started = None
         self.valid_streak = self.bite_streak = self.bite_clear_streak = 0
         self.ambiguous_streak = 0
+        self.ambiguous_started = None
+        self.ambiguous_resume_frames = 0
         self.bite_latched = False
         self.desired_held = True
         self.held = True
@@ -452,6 +513,9 @@ class Controller:
         self.state = "Track"
         self.absent_started = None
         self.ambiguous_streak = 0
+        self.ambiguous_started = None
+        self.ambiguous_resume_frames = 0
+        self.retry_count = 0
         t_obs = capture_time if capture_time is not None else now
         frame_age = max(0.0, now - t_obs)
 
@@ -651,12 +715,38 @@ class Controller:
                 self.bite_latched = True
                 return "click"
             if status == "valid" and x is not None and target is not None:
+                self.retry_count = 0
                 return self._track_step(now, x, target, capture_time=capture_time)
+            if self.wait_started is not None and (now - float(self.wait_started) >= self.wait_timeout):
+                # Only recast if confirmed absent (never recast during minigame or ambiguous frames)
+                if status == "absent":
+                    if self.retry_count < self.max_retries:
+                        self.retry_count += 1
+                        self.reason = f"wait timed out, recasting (attempt {self.retry_count}/{self.max_retries})"
+                        return self._enter_cast(now)
+                    else:
+                        if self.continuous_recovery:
+                            wait_cooldown = float(self.settings.get("continuous_wait_cooldown", 5.0))
+                            if now - float(self.wait_started) >= self.wait_timeout + wait_cooldown:
+                                self.retry_count = 1
+                                self.reason = "wait timed out, auto-recasting"
+                                return self._enter_cast(now)
+                            self.reason = "wait timed out, waiting for target"
+                            return "none"
+                        return self._pause(f"wait timed out after {self.retry_count} retries")
+                elif status == "ambiguous":
+                    self.reason = "waiting for target detection to resolve"
+                    return "none"
             return "none"
         if self.state == "End":
             self.desired_held = False
             if status == "valid" and x is not None and target is not None:
+                self.retry_count = 0
                 return self._track_step(now, x, target, capture_time=capture_time)
+            if status == "ambiguous":
+                # Do not treat ambiguous detection as absent to trigger premature recast
+                self.reason = "waiting for unambiguous target state"
+                return "none"
             if self.absent_started is None:
                 self.absent_started = now
             if now - self.absent_started >= 1.0:
@@ -665,10 +755,57 @@ class Controller:
         if self.state == "Track":
             if status == "ambiguous":
                 self.ambiguous_streak += 1
-                if self.ambiguous_streak >= 30:
+                self.ambiguous_resume_frames = 0
+                self.absent_started = None
+                if self.ambiguous_started is None:
+                    self.ambiguous_started = now
+                self.previous_x = self.previous_time = None
+                self.velocity = 0.0
+                self.desired_held = False
+                action = "release" if self.held else "none"
+                self.held = False
+                self.actual_held = False
+                if now - self.ambiguous_started >= self.ambiguous_timeout and not self.continuous_recovery:
                     return self._pause("bar detection is ambiguous")
-                return "none"
-            self.ambiguous_streak = 0
+                self.reason = "bar detection is ambiguous (stabilizing)"
+                return action
+
+            # If recovering from ambiguous frames, require 2 consecutive valid frames
+            if self.ambiguous_started is not None or self.ambiguous_streak > 0:
+                if status == "valid" and x is not None and target is not None:
+                    self.ambiguous_resume_frames += 1
+                    if self.ambiguous_resume_frames < 2:
+                        self.previous_x = x
+                        self.previous_time = capture_time if capture_time is not None else now
+                        self.velocity = 0.0
+                        self.absent_started = None
+                        self.desired_held = False
+                        self.reason = "resuming track (stabilizing)"
+                        return "none"
+                    else:
+                        self.ambiguous_started = None
+                        self.ambiguous_streak = 0
+                        self.ambiguous_resume_frames = 0
+                        return self._track_step(now, x, target, capture_time=capture_time)
+                elif self.continuous_recovery and status == "absent":
+                    self.previous_x = self.previous_time = None
+                    self.velocity = 0.0
+                    self.ambiguous_resume_frames = 0
+                    self.desired_held = False
+                    action = "release" if self.held else "none"
+                    self.held = False
+                    self.actual_held = False
+                    self.absent_started = self.absent_started if self.absent_started is not None else now
+                    if now - self.absent_started < 0.25:
+                        self.reason = "waiting for target detection to resolve"
+                        return action
+                    self.ambiguous_started = None
+                    self.ambiguous_streak = 0
+                else:
+                    self.ambiguous_started = None
+                    self.ambiguous_streak = 0
+                    self.ambiguous_resume_frames = 0
+
             if status != "valid" or x is None or target is None:
                 self.previous_x = self.previous_time = None
                 self.absent_started = self.absent_started if self.absent_started is not None else now
@@ -676,7 +813,7 @@ class Controller:
                 action = "release" if self.held else "none"
                 self.held = False
                 self.actual_held = False
-                if now - self.absent_started < 0.25:
+                if now - self.absent_started < self.absent_timeout:
                     self.reason = "target temporarily lost"
                     return action
                 self.state = "End"
@@ -1313,6 +1450,7 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict[str, Any]:
         lin_env = lin_data.get("env_mode") or data.get("env_mode", "desktop")
         lin_desktop_rois = lin_data.get("desktop_rois") or data.get("rois") or {"bar": None, "bite": None}
         lin_gs_rois = lin_data.get("gamescope_rois") or data.get("gamescope_rois") or {"bar": None, "bite": None}
+        vk_override = lin_data.get("gamescope_vk_device_override") or data.get("gamescope_vk_device_override")
         result["linux"] = {
             "env_mode": str(lin_env),
             "desktop_rois": dict(lin_desktop_rois) if isinstance(lin_desktop_rois, dict) else {"bar": None, "bite": None},
@@ -1320,6 +1458,9 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict[str, Any]:
             "gamescope_fps": int(lin_data.get("gamescope_fps", data.get("gamescope_fps", 60))),
             "gamescope_res": str(lin_data.get("gamescope_res", data.get("gamescope_res", "1280x720"))),
             "gamescope_fullscreen": bool(lin_data.get("gamescope_fullscreen", data.get("gamescope_fullscreen", False))),
+            "gamescope_vk_device_override": str(vk_override).strip() if vk_override else None,
+            "auto_restart_30s": bool(lin_data.get("auto_restart_30s", data.get("auto_restart_30s", True))),
+            "auto_restart_interval": int(lin_data.get("auto_restart_interval", data.get("auto_restart_interval", 30))),
         }
 
     # Mirror active platform settings to top-level keys
@@ -1330,6 +1471,7 @@ def load_settings(path: Path = SETTINGS_FILE) -> dict[str, Any]:
         result["gamescope_fps"] = result["linux"]["gamescope_fps"]
         result["gamescope_res"] = result["linux"]["gamescope_res"]
         result["gamescope_fullscreen"] = result["linux"]["gamescope_fullscreen"]
+        result["gamescope_vk_device_override"] = result["linux"]["gamescope_vk_device_override"]
         result["gamescope_rois"] = dict(result["linux"]["gamescope_rois"])
         if result["linux"]["env_mode"] == "gamescope":
             result["rois"] = dict(result["linux"]["gamescope_rois"])
@@ -1410,6 +1552,8 @@ class BaseFishingApp:
             "ack": self.tk.BooleanVar(value=bool(self.settings.get("bite_ack", DEFAULT_SETTINGS["bite_ack"]))),
             "debug": self.tk.BooleanVar(value=bool(self.settings.get("debug", DEFAULT_SETTINGS.get("debug", False)))),
             "auto_refocus": self.tk.BooleanVar(value=bool(self.settings.get("auto_refocus", False))),
+            "auto_restart_30s": self.tk.BooleanVar(value=bool(self.settings.get("auto_restart_30s", True))),
+            "auto_restart_interval": self.tk.StringVar(value=str(self.settings.get("auto_restart_interval", 30))),
             "test_hold_duration": self.tk.StringVar(value="1.0"),
         }
 
@@ -1709,6 +1853,40 @@ class BaseFishingApp:
                                                style="Primary.TButton", command=self._toggle_start_stop)
         self.main_action_btn.pack(fill="x", pady=(4, 6))
 
+        restart_row = self.tk.Frame(step3_card, bg=BG_CARD)
+        restart_row.pack(fill="x", pady=(2, 4))
+        self.auto_restart_cb = self.ttk.Checkbutton(
+            restart_row,
+            text="🔄 หยุดและเริ่มใหม่อัตโนมัติทุกๆ",
+            variable=self.vars["auto_restart_30s"],
+            command=self._on_auto_restart_toggle,
+        )
+        self.auto_restart_cb.pack(side="left")
+
+        self.auto_restart_entry = self.ttk.Combobox(
+            restart_row,
+            textvariable=self.vars["auto_restart_interval"],
+            values=("10", "15", "20", "25", "30", "45", "60", "90", "120"),
+            width=4,
+            justify="center",
+        )
+        self.auto_restart_entry.pack(side="left", padx=(4, 4))
+        self.auto_restart_entry.bind("<<ComboboxSelected>>", lambda _e: self._on_auto_restart_interval_change())
+        self.auto_restart_entry.bind("<FocusOut>", lambda _e: self._on_auto_restart_interval_change())
+        self.auto_restart_entry.bind("<Return>", lambda _e: self._on_auto_restart_interval_change())
+
+        self.auto_restart_unit_lbl = self.tk.Label(
+            restart_row,
+            text="วินาที (รีเฟรชการ Track อัตโนมัติ)",
+            fg=TEXT_MUTED,
+            bg=BG_CARD,
+            font=(self.ui_font, 9),
+        )
+        self.auto_restart_unit_lbl.pack(side="left")
+
+        if not bool(self.vars["auto_restart_30s"].get()):
+            self.auto_restart_entry.configure(state="disabled")
+
         self.action_guidance_lbl = self.tk.Label(step3_card, text="กรุณาเลือกพื้นที่บนหน้าจอในขั้นตอนที่ 1 ก่อนเริ่ม",
                                                  fg=AMBER_WARN, bg=BG_CARD, font=(self.ui_font, 10), wraplength=600, justify="left")
         self.action_guidance_lbl.pack(anchor="w")
@@ -1775,6 +1953,15 @@ class BaseFishingApp:
         self.tk.Label(tuning, text="ความเข้มงวดสัญญาณปลากิน (0–1)", fg=TEXT_MAIN, bg=BG_CARD,
                       font=(self.ui_font, 10)).grid(row=4, column=0, sticky="w", pady=3)
         self.ttk.Entry(tuning, textvariable=self.vars["threshold"], width=8).grid(row=4, column=1, sticky="w", padx=8, pady=3)
+
+        self.tk.Label(tuning, text="รอบรีเซ็ตอัตโนมัติ (วินาที)", fg=TEXT_MAIN, bg=BG_CARD,
+                      font=(self.ui_font, 10)).grid(row=5, column=0, sticky="w", pady=3)
+        restart_box = self.ttk.Combobox(tuning, textvariable=self.vars["auto_restart_interval"],
+                                        values=("10", "15", "20", "25", "30", "45", "60", "90", "120"), width=7)
+        restart_box.grid(row=5, column=1, sticky="w", padx=(8, 16), pady=3)
+        restart_box.bind("<<ComboboxSelected>>", lambda _e: self._on_auto_restart_interval_change())
+        restart_box.bind("<FocusOut>", lambda _e: self._on_auto_restart_interval_change())
+        restart_box.bind("<Return>", lambda _e: self._on_auto_restart_interval_change())
 
         self._build_advanced_tuning(tuning)
 
@@ -1845,7 +2032,7 @@ class BaseFishingApp:
     def _toggle_start_stop(self):
         if getattr(self, "_closing", False):
             return
-        if self.running or getattr(self, "start_pending", False):
+        if self.running or getattr(self, "start_pending", False) or getattr(self, "_pending_restart_job", None) is not None:
             self.stop_requested.set()
             self.stop("หยุดด้วย F8")
         elif getattr(self, "test_hold_pending", False) or getattr(self, "test_hold_active", False):
@@ -1994,11 +2181,25 @@ class BaseFishingApp:
             "screen capture failed": "อ่านภาพหน้าจอไม่สำเร็จ",
             "screen capture failed (retrying)": "จับภาพไม่ได้ — กำลังลองใหม่",
             "bar detection is ambiguous": "พบแถบหลายตำแหน่ง จึงหยุดเพื่อความปลอดภัย",
+            "bar detection is ambiguous (stabilizing)": "ภาพแถบไม่ชัดเจน — ปล่อยเมาส์รอความนิ่ง",
             "target window moved or pointer left it": "หน้าต่างเกมย้ายตำแหน่งหรือตัวชี้ออกนอกพื้นที่",
+            "target window lost or unmapped inside Gamescope": "ไม่พบหน้าต่างเกมในจอ Gamescope",
+            "target window closed": "หน้าต่างเกมถูกปิด",
+            "target window closed or destroyed": "หน้าต่างเกมถูกปิดหรือถูกทำลาย",
+            "window capture failed": "จับภาพหน้าต่างเกมไม่สำเร็จ",
+            "heartbeat timeout from UI": "ขาดการติดต่อกับหน้าต่างหลัก",
+            "waiting for unambiguous target state": "รอความชัดเจนของเป้าหมาย",
+            "input injection failed repeatedly": "ส่งคำสั่งเมาส์ซ้ำๆ ไม่สำเร็จ",
+            "waiting for Gamescope target window": "รอภาพหน้าต่างเกมใน Gamescope",
+            "waiting for Gamescope frame capture": "รอภาพจาก Gamescope",
+            "target temporarily lost": "เป้าหมายคลาดเคลื่อนชั่วคราว — กำลังตรวจจับใหม่",
+            "wait timed out, auto-recasting": "หมดเวลารอ — กำลังเหวี่ยงเบ็ดใหม่",
         }
         display = str(text)
         if display in reason_names:
             display = reason_names[display]
+        elif display.startswith("wait timed out"):
+            display = "รอปลานานเกินกำหนด: " + display
         elif display.startswith("Start blocked:"):
             display = "เริ่มไม่ได้: " + display.split(":", 1)[1].strip()
         elif display.startswith("Preview failed:"):
@@ -2099,6 +2300,11 @@ class BaseFishingApp:
                     self.action_guidance_lbl.configure(text="⚠️  กรุณาเลือกพื้นที่บนหน้าจอในขั้นตอนที่ 1 ก่อนเริ่ม", fg="#f59e0b")
 
     def _read_ui(self):
+        try:
+            interval = int(str(self.vars["auto_restart_interval"].get()).strip()) if "auto_restart_interval" in self.vars else 30
+            interval = max(5, min(600, interval))
+        except Exception:
+            interval = 30
         return {
             "fishing_mode": str(self.vars["fishing_mode"].get()),
             "cast_seconds": float(self.vars["cast_seconds"].get()),
@@ -2108,6 +2314,8 @@ class BaseFishingApp:
             "right_on_hold": bool(self.vars["right"].get()),
             "bite_ack": bool(self.vars["ack"].get()),
             "debug": bool(self.vars["debug"].get()),
+            "auto_restart_30s": bool(self.vars["auto_restart_30s"].get()) if "auto_restart_30s" in self.vars else True,
+            "auto_restart_interval": interval,
             "rois": self.settings.get("rois", {}),
         }
 
@@ -2601,6 +2809,147 @@ class BaseFishingApp:
                 lines.append(f"  {ev}")
         return "\n".join(lines)
 
+    def _cancel_auto_restart(self) -> None:
+        if getattr(self, "_auto_restart_job", None) is not None:
+            try:
+                self.root.after_cancel(self._auto_restart_job)
+            except Exception:
+                pass
+            self._auto_restart_job = None
+        if getattr(self, "_pending_restart_job", None) is not None:
+            try:
+                self.root.after_cancel(self._pending_restart_job)
+            except Exception:
+                pass
+            self._pending_restart_job = None
+
+    def _schedule_auto_restart(self) -> None:
+        self._cancel_auto_restart()
+        if not self.running or getattr(self, "_closing", False) or self.stop_requested.is_set():
+            return
+        enabled = True
+        if hasattr(self, "vars") and "auto_restart_30s" in self.vars:
+            enabled = bool(self.vars["auto_restart_30s"].get())
+        elif isinstance(self.settings, dict):
+            enabled = bool(self.settings.get("auto_restart_30s", True))
+        if not enabled:
+            return
+
+        interval = 30
+        if hasattr(self, "vars") and "auto_restart_interval" in self.vars:
+            try:
+                interval = max(5, int(self.vars["auto_restart_interval"].get()))
+            except Exception:
+                interval = 30
+        elif isinstance(self.settings, dict):
+            try:
+                interval = max(5, int(self.settings.get("auto_restart_interval", 30)))
+            except Exception:
+                interval = 30
+
+        self._auto_restart_job = self.root.after(interval * 1000, self._perform_auto_restart)
+
+    def _perform_auto_restart(self) -> None:
+        self._auto_restart_job = None
+        if not self.running or getattr(self, "_closing", False) or self.stop_requested.is_set():
+            return
+
+        # If currently in the middle of active minigame tracking, grant brief grace to let the catch finish
+        controller = getattr(self, "controller", None)
+        worker_state = getattr(self, "last_worker_state", None)
+        is_tracking = False
+        track_age = 0.0
+        if controller and getattr(controller, "state", None) == "Track":
+            is_tracking = True
+            track_age = time.monotonic() - getattr(controller, "track_entered_time", 0.0)
+        elif worker_state == "Track":
+            is_tracking = True
+            track_age = time.monotonic() - getattr(self, "last_worker_track_start", time.monotonic())
+
+        if is_tracking and track_age < 18.0 and not getattr(self, "_in_restart_grace", False):
+            self._in_restart_grace = True
+            self._auto_restart_job = self.root.after(4000, self._perform_auto_restart)
+            return
+
+        self._in_restart_grace = False
+        interval = 30
+        if hasattr(self, "vars") and "auto_restart_interval" in self.vars:
+            try:
+                interval = int(self.vars["auto_restart_interval"].get())
+            except Exception:
+                interval = 30
+        elif isinstance(self.settings, dict):
+            try:
+                interval = int(self.settings.get("auto_restart_interval", 30))
+            except Exception:
+                interval = 30
+
+        self._set_status(f"🔄 รีเซ็ตหยุดและเริ่มใหม่อัตโนมัติ (รอบ {interval} วินาที)...")
+        if hasattr(self, "_log_debug_event"):
+            self._log_debug_event("auto_restart_cycle", {"interval": interval})
+
+        # Stop current session cleanly
+        self.stop(reason="auto_restart_cycle")
+
+        # Allow 400ms for worker process and mouse state to settle, then restart fresh
+        self._pending_restart_job = self.root.after(400, self._restart_after_cycle)
+
+    def _restart_after_cycle(self) -> None:
+        self._pending_restart_job = None
+        if getattr(self, "_closing", False) or self.stop_requested.is_set():
+            return
+        if self.running:
+            return
+
+        # Start anew
+        if getattr(self, "env_mode", "desktop") == "gamescope" and hasattr(self, "_start_gamescope"):
+            self._start_gamescope()
+        elif getattr(self, "env_mode", "desktop") == "dual_screen" and hasattr(self, "_start_dual_screen"):
+            self._start_dual_screen()
+        elif getattr(self, "target", None) and is_window_alive(self.target[0]):
+            try:
+                settings = self._settings()
+                self.start_pending = True
+                self._start_now(settings)
+            except Exception:
+                self.start()
+        else:
+            self.start()
+
+    def _on_auto_restart_toggle(self) -> None:
+        enabled = bool(self.vars["auto_restart_30s"].get())
+        if hasattr(self, "auto_restart_entry"):
+            try:
+                self.auto_restart_entry.configure(state="normal" if enabled else "disabled")
+            except Exception:
+                pass
+        if not enabled:
+            self._cancel_auto_restart()
+        elif self.running:
+            self._schedule_auto_restart()
+        self.settings["auto_restart_30s"] = enabled
+        if "linux" in self.settings and isinstance(self.settings["linux"], dict):
+            self.settings["linux"]["auto_restart_30s"] = enabled
+        if "windows" in self.settings and isinstance(self.settings["windows"], dict):
+            self.settings["windows"]["auto_restart_30s"] = enabled
+        save_settings(self.settings)
+
+    def _on_auto_restart_interval_change(self) -> None:
+        try:
+            val = int(str(self.vars["auto_restart_interval"].get()).strip())
+            val = max(5, min(600, val))
+        except Exception:
+            val = 30
+        self.vars["auto_restart_interval"].set(str(val))
+        self.settings["auto_restart_interval"] = val
+        if "linux" in self.settings and isinstance(self.settings["linux"], dict):
+            self.settings["linux"]["auto_restart_interval"] = val
+        if "windows" in self.settings and isinstance(self.settings["windows"], dict):
+            self.settings["windows"]["auto_restart_interval"] = val
+        save_settings(self.settings)
+        if self.running and bool(self.vars["auto_restart_30s"].get()):
+            self._schedule_auto_restart()
+
     def start(self):
         if (self.running or getattr(self, "start_pending", False)
                 or getattr(self, "test_hold_pending", False)
@@ -2778,6 +3127,7 @@ class BaseFishingApp:
             mode = settings.get("fishing_mode", "rod")
             mode_name = MODE_CONFIGS.get(mode, MODE_CONFIGS["rod"])["name"]
             self._set_status(f"กำลังทำงาน — โหมด{mode_name} — กด F8 เพื่อหยุดทันที")
+            self._schedule_auto_restart()
             self.root.after(0, self._pump)
         except Exception as exc:
             self._set_mode_widgets_state("normal")
@@ -3002,9 +3352,20 @@ class BaseFishingApp:
         was_running = self.running
         self.running = False
 
-        self._set_mode_widgets_state("normal")
-        if hasattr(self, "main_action_btn"):
-            self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
+        if reason == "auto_restart_cycle":
+            if getattr(self, "_auto_restart_job", None) is not None:
+                try:
+                    self.root.after_cancel(self._auto_restart_job)
+                except Exception:
+                    pass
+                self._auto_restart_job = None
+            if hasattr(self, "main_action_btn"):
+                self.main_action_btn.configure(text="🔄  กำลังรีเซ็ต...", style="Danger.TButton")
+        else:
+            self._cancel_auto_restart()
+            self._set_mode_widgets_state("normal")
+            if hasattr(self, "main_action_btn"):
+                self.main_action_btn.configure(text="▶  เริ่ม Auto (F8)", style="Primary.TButton")
         controller = getattr(self, "controller", None)
         previous_reason = controller.reason if controller else ""
         if controller:
@@ -3027,6 +3388,7 @@ class BaseFishingApp:
 
     def close(self):
         self._closing = True
+        self._cancel_auto_restart()
         self.stop()
         if getattr(self, "_global_hotkey_cleanup", None):
             try:

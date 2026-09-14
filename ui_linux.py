@@ -586,6 +586,16 @@ class LinuxFishingApp(BaseFishingApp):
             self._update_readiness()
             return
         if self.gamescope_launch_error:
+            if owned is not None and owned.poll() is None and gm:
+                session = gm.find_active_gamescope_session()
+                if session and session.get("display"):
+                    self.gamescope_display = session["display"]
+                    self.gamescope_session = session
+                    self.gamescope_launch_error = None
+                    self._set_status(f"เปิด Sober แล้ว ({self.gamescope_display}) — กำลังตรวจหน้าต่างเกม")
+                    self._refresh_gamescope_status()
+                    self.gamescope_status_job = self.root.after(2000, self._poll_gamescope_status)
+                    return
             self._update_readiness()
             self.gamescope_status_job = self.root.after(2000, self._poll_gamescope_status)
             return
@@ -707,17 +717,36 @@ class LinuxFishingApp(BaseFishingApp):
             if gm is None:
                 raise RuntimeError("ไม่พบโมดูล gamescope_manager บนระบบ")
 
+            prefer_vk = None
+            if isinstance(self.settings, dict):
+                override = self.settings.get("gamescope_vk_device_override")
+                if not override and isinstance(self.settings.get("linux"), dict):
+                    override = self.settings["linux"].get("gamescope_vk_device_override")
+                if override:
+                    prefer_vk = str(override).strip() or None
+
             proc, discovered = gm.launch_sober_in_gamescope(
                 width=w_val,
                 height=h_val,
                 fullscreen=fs_val,
                 refresh_rate=fps_val,
+                prefer_vk_device=prefer_vk,
+                timeout=30.0,
             )
-            error = (
-                None
-                if discovered
-                else "ไม่พบจอ Gamescope ภายใน 10 วินาที — ตรวจว่า Gamescope และไดรเวอร์ X11 พร้อมใช้งาน"
-            )
+            if not discovered:
+                return_code = proc.poll() if proc is not None else None
+                if return_code is not None:
+                    out = gm.read_process_output(proc).strip() if gm and proc else ""
+                    tail = f" — ข้อความท้าย: {out[-500:]}" if out else ""
+                    error = f"Gamescope จบการทำงานก่อนพบ display (exit code {return_code}){tail}"
+                elif proc is not None:
+                    out = gm.read_process_output(proc).strip() if gm and proc else ""
+                    tail = f" — ข้อความวินิจฉัย: {out[-500:]}" if out else ""
+                    error = f"ไม่พบ display Gamescope ภายใน 30 วินาที แต่ process ยังทำงานอยู่ (PID {proc.pid}){tail}"
+                else:
+                    error = "ไม่พบ display Gamescope ภายใน 30 วินาที"
+            else:
+                error = None
         except Exception as exc:
             discovered = None
             error = str(exc)
@@ -742,9 +771,13 @@ class LinuxFishingApp(BaseFishingApp):
         self.gamescope_launch_pending = False
         self._set_gamescope_launch_button("normal")
         if error:
-            if proc is not None and gm:
-                gm.stop_process_safely(proc)
-            self.spawned_gamescope_proc = None
+            proc_running = bool(proc is not None and proc.poll() is None)
+            if not proc_running:
+                if proc is not None and gm:
+                    gm.stop_process_safely(proc)
+                self.spawned_gamescope_proc = None
+            else:
+                self.spawned_gamescope_proc = proc
             self.gamescope_display = None
             self.gamescope_session = None
             self.gamescope_launch_error = error
@@ -944,6 +977,16 @@ class LinuxFishingApp(BaseFishingApp):
         result["gamescope_res"] = res_val
         result["gamescope_fullscreen"] = fs_val
         result["env_mode"] = self.env_mode
+        if self.env_mode == "gamescope":
+            result["rois"] = dict(self.settings.get("gamescope_rois", {}))
+
+        override = None
+        if isinstance(self.settings, dict):
+            override = self.settings.get("gamescope_vk_device_override")
+            if not override and isinstance(self.settings.get("linux"), dict):
+                override = self.settings["linux"].get("gamescope_vk_device_override")
+        if override:
+            result["gamescope_vk_device_override"] = str(override).strip()
         return result
 
     def _capture_area(self, name: str) -> None:
@@ -1083,6 +1126,7 @@ class LinuxFishingApp(BaseFishingApp):
             self._set_status(
                 f"กำลังทำงานในจอแยก (Gamescope) — โหมด{mode_name} — ใช้งานจอ 2 ได้ตามปกติ"
             )
+            self._schedule_auto_restart()
             self.root.after(20, self._pump_gamescope)
         except Exception as exc:
             self.stop(f"เริ่มไม่ได้: {exc}")
@@ -1093,29 +1137,37 @@ class LinuxFishingApp(BaseFishingApp):
         if self.stop_requested.is_set():
             self.stop("หยุดฉุกเฉินด้วย F8")
             return
-        if not self.gamescope_worker_proc or not self.gamescope_worker_proc.is_alive():
-            self.stop("Worker process terminated unexpectedly")
-            return
 
+        # 1. Heartbeat ping first to guarantee worker is never starved
         now = time.monotonic()
-        if now - self.gamescope_last_ping > 1.5:
+        if now - self.gamescope_last_ping > 1.0:
             self.gamescope_last_ping = now
             try:
-                self.gamescope_pipe.send(("PING",))
+                if self.gamescope_pipe:
+                    self.gamescope_pipe.send(("PING",))
             except Exception:
                 pass
 
+        # 2. Process bounded batch of IPC messages and collapse PREVIEW frames
+        packets_processed = 0
+        latest_preview = None
         try:
-            while self.gamescope_pipe and self.gamescope_pipe.poll():
+            while self.gamescope_pipe and self.gamescope_pipe.poll() and packets_processed < 25:
+                packets_processed += 1
                 packet = self.gamescope_pipe.recv()
                 msg_type = packet[0]
                 if msg_type == "STATUS":
                     st = packet[1]
                     state = st.get("state", "Track")
+                    if state == "Track" and getattr(self, "last_worker_state", None) != "Track":
+                        self.last_worker_track_start = time.monotonic()
+                    self.last_worker_state = state
                     reason = st.get("reason", "")
                     fps = st.get("fps", 0.0)
                     obs = st.get("observation_bar", "")
-                    if self.settings.get("debug") and st.get("telemetry"):
+                    if "waiting for Gamescope" in reason or "frame capture" in reason or "target window" in reason:
+                        self._set_status("รอภาพจาก Gamescope")
+                    elif self.settings.get("debug") and st.get("telemetry"):
                         t = st["telemetry"]
                         self._set_status(
                             f"[ดีบัก-Gamescope] ช่อง:[{t.get('target_left', 0):.0f},{t.get('target_right', 0):.0f}] "
@@ -1127,16 +1179,31 @@ class LinuxFishingApp(BaseFishingApp):
                     else:
                         self._set_status(f"{state}: {reason or 'tracking'} | {fps:.1f} FPS")
                 elif msg_type == "PREVIEW":
-                    crop_img, bar_res = packet[1], packet[2]
-                    self._update_preview_display(crop_img, bar_res)
+                    # Keep only newest preview frame to avoid UI rendering backlog
+                    latest_preview = (packet[1], packet[2])
                 elif msg_type == "STOPPED":
                     self.stop(packet[1])
                     return
                 elif msg_type == "ERROR":
                     self.stop(f"ข้อผิดพลาด: {packet[1]}")
                     return
+
+            # Render only the latest preview frame if UI window is visible (not iconic/minimized)
+            if latest_preview is not None:
+                is_iconic = False
+                try:
+                    is_iconic = (self.root.state() == "iconic")
+                except Exception:
+                    pass
+                if not is_iconic:
+                    self._update_preview_display(latest_preview[0], latest_preview[1])
         except Exception as exc:
             self.stop(f"IPC error: {exc}")
+            return
+
+        # 3. Check worker alive only after draining pipe
+        if not self.gamescope_worker_proc or not self.gamescope_worker_proc.is_alive():
+            self.stop("Worker process terminated unexpectedly")
             return
 
         self.root.after(20, self._pump_gamescope)
@@ -1156,6 +1223,7 @@ class LinuxFishingApp(BaseFishingApp):
                 pass
             self.gamescope_worker_proc = None
             self.gamescope_pipe = None
+        self.last_worker_state = None
 
         super().stop(reason)
 
@@ -1188,11 +1256,18 @@ class LinuxFishingApp(BaseFishingApp):
             self.settings["linux"] = {}
         self.settings["linux"]["env_mode"] = self.env_mode
         if self.env_mode == "gamescope":
-            self.settings["linux"]["gamescope_rois"] = dict(settings.get("rois", {}))
-            self.settings["gamescope_rois"] = dict(settings.get("rois", {}))
+            gamescope_rois = self.settings.get("gamescope_rois", {})
+            self.settings["linux"]["gamescope_rois"] = dict(gamescope_rois)
+            self.settings["gamescope_rois"] = dict(gamescope_rois)
         else:
             self.settings["linux"]["desktop_rois"] = dict(settings.get("rois", {}))
         self.settings["env_mode"] = self.env_mode
+        override = self.settings.get("gamescope_vk_device_override")
+        if not override and isinstance(self.settings.get("linux"), dict):
+            override = self.settings["linux"].get("gamescope_vk_device_override")
+        if override:
+            self.settings["gamescope_vk_device_override"] = str(override).strip()
+            self.settings["linux"]["gamescope_vk_device_override"] = str(override).strip()
         save_settings(self.settings)
         return settings
 

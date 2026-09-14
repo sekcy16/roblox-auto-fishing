@@ -44,6 +44,16 @@ class GamescopeWorker:
         self.fps_count = 0
         self.fps_start = time.monotonic()
         self.template = None
+        self.target_lost_since: float | None = None
+        self.capture_fail_since: float | None = None
+        self.target_lost_streak: int = 0
+        self.capture_fail_streak: int = 0
+        self.target_window_dead: bool = False
+        self.parent_pid: int = os.getppid()
+        self.input_fail_streak: int = 0
+        self.last_detection_status: str | None = None
+        self.last_controller_state: str | None = None
+        self.recent_events: list[dict[str, Any]] = []
 
     def connect(self) -> bool:
         """Connect to nested X11 display and resolve target client window."""
@@ -59,7 +69,7 @@ class GamescopeWorker:
             return False
 
     def release_mouse(self) -> None:
-        """Safely release the virtual mouse on the nested display."""
+        """Safely release the virtual mouse on the nested display and sync controller."""
         if self.d:
             try:
                 xtest.fake_input(self.d, X.ButtonRelease, 1)
@@ -67,6 +77,77 @@ class GamescopeWorker:
             except Exception:
                 pass
         self.mouse_held = False
+        if getattr(self, "controller", None):
+            self.controller.sync_held(False)
+
+    def _reset_kinematics(self) -> None:
+        """Reset stale kinematics on controller after interruptions or frame drops."""
+        if getattr(self, "controller", None):
+            self.controller.previous_x = None
+            self.controller.previous_time = None
+            self.controller.velocity = 0.0
+
+    def _write_runtime_log(self, entry: dict[str, Any]) -> None:
+        """Append diagnostic events to runtime-events.log with size capping."""
+        try:
+            log_path = ROOT / "runtime-events.log"
+            if log_path.is_file() and log_path.stat().st_size > 2 * 1024 * 1024:
+                old_log = ROOT / "runtime-events.log.old"
+                try:
+                    if old_log.exists():
+                        old_log.unlink()
+                    log_path.rename(old_log)
+                except Exception:
+                    pass
+            with log_path.open("a", encoding="utf-8") as f:
+                ts = time.strftime("%Y-%m-%d %H:%M:%S")
+                millis = int(time.time() * 1000) % 1000
+                f.write(
+                    f"[{ts}.{millis:03d}] [{entry.get('event')}] "
+                    f"state={entry.get('state')} "
+                    f"controller_held={entry.get('controller_held')} "
+                    f"mouse_held={entry.get('mouse_held')} "
+                    f"desired={entry.get('desired_held')} "
+                    f"details={entry.get('details')}\n"
+                )
+        except Exception:
+            pass
+
+    def _log_event(self, event_type: str, details: dict[str, Any]) -> None:
+        """Record diagnostic events with timestamps and state snapshots."""
+        entry = {
+            "monotonic": round(time.monotonic(), 3),
+            "event": event_type,
+            "mouse_held": self.mouse_held,
+            "controller_held": getattr(self.controller, "held", False) if self.controller else False,
+            "desired_held": getattr(self.controller, "desired_held", False) if self.controller else False,
+            "state": getattr(self.controller, "state", "Unknown") if self.controller else "Unknown",
+            "details": details,
+        }
+        self.recent_events.append(entry)
+        if len(self.recent_events) > 50:
+            self.recent_events.pop(0)
+        self._write_runtime_log(entry)
+
+    def _send_recovery_status(self, now: float, reason: str) -> None:
+        """Tell the UI about a recoverable outage without flooding the pipe."""
+        if now - self.last_preview_time <= 0.12:
+            return
+        self.last_preview_time = now
+        self._safe_send(("STATUS", {
+            "state": getattr(self.controller, "state", "Track"),
+            "reason": reason,
+            "fps": 0.0,
+            "telemetry": {},
+        }))
+
+    def check_parent_alive(self) -> bool:
+        """Check if parent UI process is still alive."""
+        try:
+            os.kill(self.parent_pid, 0)
+            return True
+        except OSError:
+            return False
 
     def check_target_valid(self) -> bool:
         """Verify that the target window still exists and is viewable inside Gamescope."""
@@ -75,7 +156,9 @@ class GamescopeWorker:
         try:
             attrs = self.target_win.get_attributes()
             return attrs.map_state == X.IsViewable
-        except (XError, Exception):
+        except (XError, Exception) as exc:
+            if "BadWindow" in type(exc).__name__ or getattr(exc, "_error", None) == 3:
+                self.target_window_dead = True
             return False
 
     def grab_window_rect(self, x: int, y: int, width: int, height: int) -> np.ndarray | None:
@@ -129,13 +212,17 @@ class GamescopeWorker:
                 self.d.sync()
                 self.mouse_held = False
                 return True
-        except Exception:
+        except (XError, Exception) as exc:
+            if "BadWindow" in type(exc).__name__ or getattr(exc, "_error", None) == 3:
+                self.target_window_dead = True
             self.release_mouse()
             return False
         return False
 
     def _safe_send(self, data: Any) -> bool:
         """Safely send data over the IPC pipe, suppressing broken pipe on UI exit."""
+        if self.pipe is None:
+            return False
         try:
             self.pipe.send(data)
             return True
@@ -193,9 +280,13 @@ class GamescopeWorker:
                         self.release_mouse()
                         return
 
-                # 2. Safety Timeout: if UI died or stopped communicating for >3s while running
+                # 2. Safety Timeout: if parent process died or stopped communicating while running
                 now = time.monotonic()
-                if self.running and (now - self.last_heartbeat > 3.0):
+                if not self.check_parent_alive():
+                    self.release_mouse()
+                    self._log_event("parent_died", {"parent_pid": self.parent_pid})
+                    return
+                if self.running and (now - self.last_heartbeat > 10.0):
                     self.stop_fishing("heartbeat timeout from UI")
 
                 # 3. If running, execute one tick of the fishing loop
@@ -220,12 +311,18 @@ class GamescopeWorker:
             self._safe_send(("ERROR", "ต้องกำหนดพื้นที่แถบมินิเกมก่อนเริ่ม"))
             return
 
-        self.controller = Controller(self.settings)
+        controller_settings = dict(self.settings)
+        controller_settings["continuous_recovery"] = True
+        self.controller = Controller(controller_settings)
         self.controller.start(time.monotonic())
         self.running = True
         self.fps_count = 0
         self.fps_start = time.monotonic()
         self.last_preview_time = 0.0
+        self.target_lost_since = None
+        self.capture_fail_since = None
+        self.target_window_dead = False
+        self._log_event("started", {"fishing_mode": self.settings.get("fishing_mode", "rod")})
 
         # Load bite template if available
         template_path = self.settings.get("template_file")
@@ -248,24 +345,35 @@ class GamescopeWorker:
         if self.controller:
             self.controller.stop(reason)
         self.release_mouse()
+        self._log_event("stopped", {"reason": reason})
         self._safe_send(("STOPPED", reason))
 
     def tick(self) -> None:
-        """Execute one frame of capture, detection, and input."""
+        """Execute one frame of capture, detection, and input with bounded recovery."""
         now = time.monotonic()
         capture_time = now
 
-        # Focus / Target Guard inside Gamescope (allow 3-5 frame retries for transient unmap/glitches)
+        # Focus / Target Guard inside Gamescope; keep listening through transient outages.
         focused = self.check_target_valid()
         if not focused:
             self.release_mouse()
+            self._reset_kinematics()
             self.target_lost_streak = getattr(self, "target_lost_streak", 0) + 1
-            if self.target_lost_streak >= 5:
-                self.stop_fishing("target window lost or unmapped inside Gamescope")
+            if getattr(self, "target_window_dead", False):
+                self._log_event("target_destroyed", {"reason": "target window closed or destroyed"})
+                self.stop_fishing("target window closed")
                 return
+            if self.target_lost_since is None:
+                self.target_lost_since = now
+                self._log_event("target_lost_start", {})
+            self._send_recovery_status(now, "waiting for Gamescope target window")
             time.sleep(0.01)
             return
+
         self.target_lost_streak = 0
+        if self.target_lost_since is not None:
+            self._log_event("target_recovered", {"outage_duration": round(now - self.target_lost_since, 3)})
+            self.target_lost_since = None
 
         bar_roi = self.settings["rois"]["bar"]
         x, y, w, h = bar_roi
@@ -273,16 +381,32 @@ class GamescopeWorker:
 
         if bar_image is None:
             self.release_mouse()
+            self._reset_kinematics()
             self.capture_fail_streak = getattr(self, "capture_fail_streak", 0) + 1
-            if self.capture_fail_streak >= 5:
-                self.controller.stop("window capture failed")
-                self.stop_fishing("window capture failed")
-                return
+            if self.capture_fail_since is None:
+                self.capture_fail_since = now
+                self._log_event("capture_fail_start", {})
+            self._send_recovery_status(now, "waiting for Gamescope frame capture")
             time.sleep(0.01)
             return
+
         self.capture_fail_streak = 0
+        if self.capture_fail_since is not None:
+            self._log_event("capture_recovered", {"outage_duration": round(now - self.capture_fail_since, 3)})
+            self.capture_fail_since = None
 
         bar = detect_bar(bar_image)
+        status = bar[0]
+        if status != getattr(self, "last_detection_status", None):
+            self._log_event("detection_transition", {
+                "prev_status": getattr(self, "last_detection_status", None),
+                "status": status,
+                "marker_x": bar[1],
+                "target": bar[2],
+                "viewable": focused,
+            })
+            self.last_detection_status = status
+
         bite = False
         mode = self.settings.get("fishing_mode", "rod")
         bite_roi = self.settings["rois"].get("bite")
@@ -294,10 +418,53 @@ class GamescopeWorker:
         observation = {"bar": bar, "bite": bite}
         self.fps_count += 1
 
+        # Synchronize controller with known physical mouse state before decision
+        if self.controller:
+            self.controller.sync_held(self.mouse_held)
+
         action = self.controller.step(now, observation, focused, capture_time=capture_time)
-        if not self.apply_action(action):
-            self.stop_fishing("input injection failed or window closed")
+
+        # Track state transitions
+        curr_state = self.controller.state if self.controller else None
+        if curr_state != getattr(self, "last_controller_state", None):
+            self._log_event("state_transition", {
+                "prev_state": getattr(self, "last_controller_state", None),
+                "state": curr_state,
+                "reason": self.controller.reason if self.controller else None,
+            })
+            self.last_controller_state = curr_state
+
+        # Reconcile action if desired state differs from confirmed physical state
+        if action == "none" and getattr(self.controller, "desired_held", False) != self.mouse_held:
+            action = "hold" if self.controller.desired_held else "release"
+
+        ok = self.apply_action(action)
+        if action in ("hold", "release") and self.controller:
+            self.controller.acknowledge_action(action, ok)
+            self.controller.sync_held(self.mouse_held)
+
+        if not ok:
+            self.release_mouse()
+            if self.controller:
+                self.controller.sync_held(False)
+            self._reset_kinematics()
+            self.input_fail_streak = getattr(self, "input_fail_streak", 0) + 1
+            self._log_event("input_injection_failed", {
+                "action": action,
+                "streak": self.input_fail_streak,
+                "target_window_dead": getattr(self, "target_window_dead", False),
+            })
+            if getattr(self, "target_window_dead", False):
+                self.stop_fishing("target window closed")
+                return
+            if self.input_fail_streak >= 10:
+                self.stop_fishing("input injection failed repeatedly")
+                return
+            # Transient failure: do not stop fishing permanently on a single glitch!
+            time.sleep(0.01)
             return
+
+        self.input_fail_streak = 0
 
         elapsed = now - self.fps_start
         fps = self.fps_count / elapsed if elapsed > 0 else 0.0
