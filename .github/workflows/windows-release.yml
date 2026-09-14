@@ -39,7 +39,7 @@ jobs:
         run: python -m unittest test_auto_fishing test_desktop_control tests.test_ui_redesign -v
       - name: Run tests
         if: runner.os == 'Linux'
-        run: xvfb-run -a python -m unittest test_auto_fishing test_desktop_control tests.test_ui_redesign tests.test_auto_restart tests.test_track_robustness tests.test_gamescope_launch tests.test_gamescope_worker -v
+        run: xvfb-run -a python -m unittest test_auto_fishing test_desktop_control tests.test_ui_redesign tests.test_auto_restart tests.test_track_robustness tests.test_gamescope_launch tests.test_gamescope_worker.GamescopeManagerUnitTests tests.test_gamescope_worker.GamescopeWorkerUnitTests -v
       - name: Build executable
         if: runner.os == 'Windows'
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RobloxAutoFishing-v0.0.8 --version-file windows-version-info.txt --exclude-module gamescope_worker --exclude-module gamescope_manager --exclude-module Xlib --exclude-module ui_linux ui_windows.py
